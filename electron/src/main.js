@@ -705,15 +705,6 @@ async function composeUp() {
   let repoSyncActive = true
   const seenRepoSyncLines = new Set()
 
-  function parseRepoSyncLine(line) {
-    const speedMatch = line.match(/\|\s*([\d.]+)\s*([KMGTP]I?B)\/S/i)
-    const pctMatch = line.match(/(?:Receiving objects|Resolving deltas|remote:\s*Compressing objects):\s+(\d+)%/i)
-    return {
-      percent: pctMatch ? Math.max(0, Math.min(100, Number(pctMatch[1]))) : null,
-      speed: speedMatch ? toBytes(speedMatch[1], speedMatch[2]) : null
-    }
-  }
-
   async function pollRepoSyncProgress() {
     if (!repoSyncActive) return
     if (!repoSyncContainerId) {
@@ -739,16 +730,11 @@ async function composeUp() {
         seenRepoSyncLines.clear()
         for (const item of arr) seenRepoSyncLines.add(item)
       }
-      const parsed = parseRepoSyncLine(line)
       emitProgress({
         stage: 'compose',
         progress: composePct,
         totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-        message: `repo-sync: ${line}`,
-        clone_active: true,
-        clone_percent: parsed.percent,
-        clone_speed: parsed.speed,
-        clone_message: line
+        message: `repo-sync: ${line}`
       })
     }
 
@@ -761,11 +747,7 @@ async function composeUp() {
         stage: 'compose',
         progress: composePct,
         totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-        message: 'repo-sync: completed',
-        clone_active: false,
-        clone_percent: 100,
-        clone_speed: null,
-        clone_message: 'Repository sync finished'
+        message: 'repo-sync: completed'
       })
     }
   }
@@ -799,8 +781,7 @@ async function composeUp() {
       stage: 'compose',
       progress: composePct,
       totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-      message: 'repo-sync: completed',
-      clone_active: false
+      message: 'repo-sync: completed'
     })
     emitStartupProgress('compose', 100, 'Containers are started')
   } finally {

@@ -32,13 +32,20 @@ from .mods_archive import (
     upload_archive_path,
     validate_mods_archive,
 )
-from .models import BuildJob
+from .models import AppSetting, BuildJob
 from .queue import build_queue, control_queue, redis_conn
-from .schemas import BuildJobCreate, BuildJobRead, StopJobRequest
+from .repo_progress import PROGRESS_CHANNEL as REPO_PROGRESS_CHANNEL
+from .repo_progress import clear_progress as clear_repo_progress
+from .repo_progress import get_progress as get_repo_progress
+from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest
 from .tasks import (
     run_build_job,
     run_delete_samsung_fw_job,
     run_extract_samsung_fw_job,
+    run_repo_clone_job,
+    run_repo_delete_job,
+    run_repo_pull_job,
+    run_repo_submodules_job,
     run_stop_job_task,
 )
 
@@ -64,6 +71,41 @@ def _read_var_from_shell_file(path: Path, var_name: str) -> str | None:
         if match:
             return match.group(1).strip()
     return None
+
+
+def _get_setting(db: Session, key: str, default: str = "") -> str:
+    row = db.get(AppSetting, key)
+    if row and row.value:
+        return row.value.strip()
+    return default
+
+
+def _set_setting(db: Session, key: str, value: str):
+    row = db.get(AppSetting, key)
+    if not row:
+        row = AppSetting(key=key, value=value)
+        db.add(row)
+    else:
+        row.value = value
+    db.commit()
+
+
+def _repo_root() -> Path:
+    base = Path(settings.un1ca_root)
+    nested = base / "UN1CA"
+    if (base / ".git").is_dir() or (base / "target").is_dir():
+        return base
+    if (nested / ".git").is_dir() or (nested / "target").is_dir():
+        return nested
+    return base
+
+
+def _repo_exists() -> bool:
+    return (_repo_root() / ".git").is_dir()
+
+
+def _repo_size_bytes() -> int:
+    return _dir_size_bytes(_repo_root())
 
 
 def _parse_model_csc(firmware_value: str) -> tuple[str, str]:
@@ -400,6 +442,39 @@ def _repo_sync_status(root: Path, branch: str) -> dict[str, str | int]:
         return {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": remote_ref}
 
 
+def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
+    repo_root = _repo_root()
+    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
+    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
+    commit_details = _resolve_commit_details() if _repo_exists() else {
+        "branch": "",
+        "short_hash": settings.source_commit or "unknown",
+        "full_hash": "",
+        "subject": "",
+        "body": "",
+        "author_name": "",
+        "author_email": "",
+        "committer_name": "",
+        "committer_email": "",
+    }
+    repo_sync = _repo_sync_status(repo_root, str(commit_details.get("branch") or "")) if _repo_exists() else {
+        "state": "unknown",
+        "ahead_by": 0,
+        "behind_by": 0,
+        "remote_ref": "",
+    }
+    return {
+        "git_url": git_url,
+        "git_ref": git_ref,
+        "repo_path": str(repo_root),
+        "repo_exists": _repo_exists(),
+        "repo_size_bytes": _repo_size_bytes(),
+        "commit": commit_details,
+        "repo_sync": repo_sync,
+        "progress": get_repo_progress(),
+    }
+
+
 def _run_repo_pull() -> dict[str, str | int]:
     # Без merge-commit: pull только fast-forward, then sync/update submodules.
     root = _resolve_un1ca_root_path()
@@ -451,6 +526,7 @@ def on_startup():
     run_migrations()
     cleaned = cleanup_stale_build_overrides()
     clear_progress()
+    clear_repo_progress()
     print(
         f"[startup] cleanup: removed {cleaned['uploaded_mod_dirs']} uploaded mod override dirs, "
         f"{cleaned['tmp_extra_mods_dirs']} temp extra-mod dirs",
@@ -657,8 +733,9 @@ def get_defaults(target: str | None = None, db: Session = Depends(get_db)):
     target_firmware = str(defaults.get("target_firmware", ""))
     source_status = _make_firmware_status(source_firmware, fw_info["items"])
     target_status = _make_firmware_status(target_firmware, fw_info["items"])
-    commit_details = _resolve_commit_details()
-    repo_sync = _repo_sync_status(_resolve_un1ca_root_path(), str(commit_details.get("branch") or ""))
+    repo_info = _repo_info(db)
+    commit_details = repo_info.get("commit") if isinstance(repo_info.get("commit"), dict) else {}
+    repo_sync = repo_info.get("repo_sync") if isinstance(repo_info.get("repo_sync"), dict) else {}
     root = _resolve_un1ca_root_path()
     return {
         "targets": targets,
@@ -670,15 +747,97 @@ def get_defaults(target: str | None = None, db: Session = Depends(get_db)):
         "current_commit_details": commit_details,
         "latest_artifact_available": _target_has_latest_artifact(db, selected_target),
         "repo_sync": repo_sync,
+        "repo_info": repo_info,
         "firmware_status": source_status,
         "target_firmware_status": target_status,
         "repo_root": str(root) if root else "",
     }
 
 
-@app.post(f"{settings.api_prefix}/repo/pull")
-def repo_pull():
-    return _run_repo_pull()
+@app.get(f"{settings.api_prefix}/repo/info")
+def repo_info(db: Session = Depends(get_db)):
+    return _repo_info(db)
+
+
+@app.patch(f"{settings.api_prefix}/repo/config")
+def update_repo_config(payload: RepoConfigUpdate, db: Session = Depends(get_db)):
+    value = (payload.git_url or "").strip()
+    if not re.match(r"^(https://|git@|ssh://).+", value):
+        raise HTTPException(400, "Invalid git url")
+    _set_setting(db, "repo.git_url", value)
+    return _repo_info(db)
+
+
+@app.post(f"{settings.api_prefix}/repo/clone", response_model=BuildJobRead)
+def repo_clone(db: Session = Depends(get_db)):
+    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
+    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
+    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo clone: {git_url}")
+    q_job = build_queue.enqueue(run_repo_clone_job, op_job.id, git_url, git_ref, job_timeout="6h", result_ttl=3600)
+    op_job.queue_job_id = q_job.id
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.post(f"{settings.api_prefix}/repo/pull", response_model=BuildJobRead)
+def repo_pull(db: Session = Depends(get_db)):
+    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
+    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo pull: {git_ref}")
+    q_job = build_queue.enqueue(run_repo_pull_job, op_job.id, git_ref, job_timeout="4h", result_ttl=3600)
+    op_job.queue_job_id = q_job.id
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.post(f"{settings.api_prefix}/repo/submodules", response_model=BuildJobRead)
+def repo_submodules(db: Session = Depends(get_db)):
+    op_job = _create_operation_job(db, target="repo", operation_name="Repo submodules update")
+    q_job = build_queue.enqueue(run_repo_submodules_job, op_job.id, job_timeout="4h", result_ttl=3600)
+    op_job.queue_job_id = q_job.id
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.delete(f"{settings.api_prefix}/repo", response_model=BuildJobRead)
+def repo_delete(mode: str = "repo_only", db: Session = Depends(get_db)):
+    if mode not in {"repo_only", "repo_with_out"}:
+        raise HTTPException(400, "mode must be repo_only or repo_with_out")
+    op_name = "Repo delete (keep out)" if mode == "repo_only" else "Repo delete (with out)"
+    op_job = _create_operation_job(db, target="repo", operation_name=op_name)
+    q_job = build_queue.enqueue(run_repo_delete_job, op_job.id, mode, job_timeout="1h", result_ttl=3600)
+    op_job.queue_job_id = q_job.id
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.websocket(f"{settings.api_prefix}/repo/progress/ws")
+async def stream_repo_progress_ws(websocket: WebSocket):
+    await websocket.accept()
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    try:
+        await websocket.send_json({"type": "snapshot", "item": get_repo_progress()})
+        pubsub.subscribe(REPO_PROGRESS_CHANNEL)
+        while True:
+            message = pubsub.get_message(timeout=1.0)
+            if message and message.get("type") == "message":
+                data = message.get("data")
+                try:
+                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
+                except Exception:
+                    payload = {"type": "error", "message": "bad repo progress payload"}
+                await websocket.send_json(payload)
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            pubsub.close()
+        except Exception:
+            pass
 
 
 @app.get(f"{settings.api_prefix}/debloat/options")

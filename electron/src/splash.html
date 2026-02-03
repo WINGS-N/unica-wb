@@ -78,28 +78,6 @@
       background: rgba(30, 41, 59, 0.8);
       border: 1px solid rgba(100, 116, 139, 0.5);
     }
-    .clone-wrap { margin-top: 8px; display: none; }
-    .clone-wrap.show { display: block; }
-    .clone-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      font-size: 11px;
-      color: #93c5fd;
-      margin-bottom: 4px;
-    }
-    .clone-msg {
-      font-size: 11px;
-      color: #94a3b8;
-      margin-top: 4px;
-      min-height: 16px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .bar.clone { height: 8px; margin-top: 0; }
-    .fill.clone { background: linear-gradient(90deg, #34d399, #22c55e, #16a34a); }
 
     .fill {
       width: 1%;
@@ -243,15 +221,6 @@
         <div id="pct" class="pct">0%</div>
       </div>
       <div class="bar"><div id="fill" class="fill"></div></div>
-      <div id="cloneWrap" class="clone-wrap">
-        <div class="clone-head">
-          <span>Init clone</span>
-          <span id="clonePct">0%</span>
-          <span id="cloneSpeed">0 B/s</span>
-        </div>
-        <div class="bar clone"><div id="cloneFill" class="fill clone"></div></div>
-        <div id="cloneMsg" class="clone-msg"></div>
-      </div>
       <div id="detail" class="meta">Preparing startup</div>
       <div id="meta" class="meta"></div>
       <pre id="logs" class="logs">[boot] waiting for progress events...</pre>
@@ -297,11 +266,6 @@
     const fillEl = document.getElementById('fill')
     const detailEl = document.getElementById('detail')
     const metaEl = document.getElementById('meta')
-    const cloneWrapEl = document.getElementById('cloneWrap')
-    const clonePctEl = document.getElementById('clonePct')
-    const cloneSpeedEl = document.getElementById('cloneSpeed')
-    const cloneFillEl = document.getElementById('cloneFill')
-    const cloneMsgEl = document.getElementById('cloneMsg')
     const logsEl = document.getElementById('logs')
     const errorEl = document.getElementById('error')
     const actionsEl = document.getElementById('actions')
@@ -401,16 +365,6 @@
         appendLog(payload.message)
       }
 
-      if (payload?.clone_active) {
-        cloneWrapEl.classList.add('show')
-        const cp = Math.max(0, Math.min(100, Number(payload.clone_percent || 0)))
-        cloneFillEl.style.width = `${cp}%`
-        clonePctEl.textContent = `${Math.round(cp)}%`
-        cloneSpeedEl.textContent = `${formatBytes(payload.clone_speed || 0)}/s`
-        cloneMsgEl.textContent = payload.clone_message || ''
-      } else if (payload?.clone_active === false) {
-        cloneWrapEl.classList.remove('show')
-      }
     }
 
     function appendLog(text) {

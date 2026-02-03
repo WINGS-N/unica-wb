@@ -77,8 +77,16 @@ const repoSync = ref({
   behind_by: 0,
   remote_ref: ''
 })
-const repoPullBusy = ref(false)
+const repoActionBusy = ref(false)
 const commitModalOpen = ref(false)
+const repoInfo = ref({
+  git_url: '',
+  git_ref: '',
+  repo_path: '',
+  repo_exists: false,
+  repo_size_bytes: 0
+})
+const repoProgress = ref({})
 const firmwareStatus = ref({
   source_model: '',
   source_csc: '',
@@ -108,6 +116,10 @@ let evtSource = null
 let firmwareProgressWs = null
 let firmwareProgressReconnect = null
 let firmwareProgressShouldReconnect = true
+let repoProgressWs = null
+let repoProgressReconnect = null
+let repoProgressShouldReconnect = true
+let repoUrlSaveTimer = null
 let timer = null
 
 function t(key) {
@@ -410,10 +422,14 @@ async function fetchDefaults(selectedTarget) {
     versionMinor.value = data.defaults?.version_minor ?? 0
     versionPatch.value = data.defaults?.version_patch ?? 0
     versionSuffix.value = data.defaults?.version_suffix || ''
-  currentCommit.value = data.current_commit || 'unknown'
-  currentCommitSubject.value = data.current_commit_subject || ''
-  currentCommitDetails.value = data.current_commit_details || currentCommitDetails.value
-  repoSync.value = data.repo_sync || repoSync.value
+    currentCommit.value = data.current_commit || 'unknown'
+    currentCommitSubject.value = data.current_commit_subject || ''
+    currentCommitDetails.value = data.current_commit_details || currentCommitDetails.value
+    repoSync.value = data.repo_sync || repoSync.value
+    if (data.repo_info) {
+      repoInfo.value = { ...repoInfo.value, ...data.repo_info }
+      if (data.repo_info.progress) repoProgress.value = data.repo_info.progress
+    }
     latestArtifactAvailable.value = Boolean(data.latest_artifact_available)
     firmwareStatus.value = data.firmware_status || firmwareStatus.value
     targetFirmwareStatus.value = data.target_firmware_status || targetFirmwareStatus.value
@@ -535,25 +551,55 @@ function closeCommitModal() {
   commitModalOpen.value = false
 }
 
-async function pullRepository() {
-  // Pull запускается из модалки Current Commit
-  // Pull action start from Current Commit modal
-  repoPullBusy.value = true
+async function queueRepoAction(path, method, okToastKey) {
+  repoActionBusy.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/repo/pull`, { method: 'POST' })
+    const r = await fetch(`${API_BASE}${API_PREFIX}${path}`, { method })
     if (!r.ok) throw new Error(await r.text())
-    const data = await r.json()
-    if (data?.commit) currentCommitDetails.value = data.commit
-    currentCommit.value = data?.commit?.short_hash || currentCommit.value
-    currentCommitSubject.value = data?.commit?.subject || currentCommitSubject.value
-    if (data?.repo_sync) repoSync.value = data.repo_sync
-    pushToast(t('repoPullSuccess'), 'success')
+    await fetchJobs()
     await fetchDefaults(target.value || undefined)
+    pushToast(t(okToastKey), 'warning')
   } catch (e) {
-    pushToast(`${t('repoPullFailed')}: ${e.message}`, 'error')
+    pushToast(`${t('repoActionFailed')}: ${e.message}`, 'error')
   } finally {
-    repoPullBusy.value = false
+    repoActionBusy.value = false
   }
+}
+
+function cloneRepository() {
+  return queueRepoAction('/repo/clone', 'POST', 'repoCloneQueued')
+}
+
+function pullRepository() {
+  return queueRepoAction('/repo/pull', 'POST', 'repoPullQueued')
+}
+
+function updateRepoSubmodules() {
+  return queueRepoAction('/repo/submodules', 'POST', 'repoSubmodulesQueued')
+}
+
+function deleteRepository(mode = 'repo_only') {
+  return queueRepoAction(`/repo?mode=${encodeURIComponent(mode)}`, 'DELETE', mode === 'repo_with_out' ? 'repoDeleteWithOutQueued' : 'repoDeleteQueued')
+}
+
+function updateRepoUrlInput(value) {
+  repoInfo.value = { ...repoInfo.value, git_url: value }
+  if (repoUrlSaveTimer) clearTimeout(repoUrlSaveTimer)
+  repoUrlSaveTimer = setTimeout(async () => {
+    try {
+      const r = await fetch(`${API_BASE}${API_PREFIX}/repo/config`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ git_url: value })
+      })
+      if (!r.ok) throw new Error(await r.text())
+      const data = await r.json()
+      repoInfo.value = { ...repoInfo.value, ...data }
+      if (data?.repo_sync) repoSync.value = data.repo_sync
+    } catch (e) {
+      pushToast(`${t('repoUrlSaveFailed')}: ${e.message}`, 'error')
+    }
+  }, 500)
 }
 
 async function deleteSamsungFwEntry(fwType, fwKey) {
@@ -791,6 +837,63 @@ function closeFirmwareProgressWs() {
   firmwareProgressWs = null
 }
 
+function connectRepoProgressWs() {
+  repoProgressShouldReconnect = true
+  if (repoProgressWs && (repoProgressWs.readyState === WebSocket.OPEN || repoProgressWs.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+  const path = `${API_PREFIX}/repo/progress/ws`
+  let wsUrl = ''
+  if (!API_BASE) {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    wsUrl = `${proto}//${window.location.host}${path}`
+  } else if (API_BASE.startsWith('http://') || API_BASE.startsWith('https://')) {
+    const url = new URL(API_BASE)
+    const proto = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    wsUrl = `${proto}//${url.host}${path}`
+  } else {
+    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+    wsUrl = `${proto}//${window.location.host}${API_BASE}${path}`
+  }
+  repoProgressWs = new WebSocket(wsUrl)
+  repoProgressWs.onmessage = (event) => {
+    let payload = null
+    try {
+      payload = JSON.parse(event.data)
+    } catch {
+      return
+    }
+    if (!payload) return
+    if (payload.type === 'snapshot') {
+      repoProgress.value = payload.item || {}
+      return
+    }
+    if (payload.type === 'removed') {
+      repoProgress.value = {}
+      return
+    }
+    repoProgress.value = payload
+  }
+  repoProgressWs.onclose = () => {
+    repoProgressWs = null
+    if (!repoProgressShouldReconnect) return
+    if (repoProgressReconnect) clearTimeout(repoProgressReconnect)
+    repoProgressReconnect = setTimeout(() => connectRepoProgressWs(), 1500)
+  }
+}
+
+function closeRepoProgressWs() {
+  repoProgressShouldReconnect = false
+  if (repoProgressReconnect) {
+    clearTimeout(repoProgressReconnect)
+    repoProgressReconnect = null
+  }
+  if (repoProgressWs && typeof repoProgressWs.close === 'function') {
+    repoProgressWs.close()
+  }
+  repoProgressWs = null
+}
+
 function getWebSocketUrl(jobId) {
   // Строим WS URL из API_BASE и текущего протокола браузера
   // Build ws url from API_BASE and current browser protocol
@@ -891,6 +994,7 @@ onMounted(async () => {
   await fetchDefaults()
   await fetchJobs()
   connectFirmwareProgressWs()
+  connectRepoProgressWs()
   if (selectedJob.value) {
     selectJob(selectedJob.value)
   }
@@ -900,6 +1004,8 @@ onMounted(async () => {
 onUnmounted(() => {
   closeLogs()
   closeFirmwareProgressWs()
+  closeRepoProgressWs()
+  if (repoUrlSaveTimer) clearTimeout(repoUrlSaveTimer)
   if (timer) clearInterval(timer)
 })
 </script>
@@ -1038,14 +1144,24 @@ onUnmounted(() => {
     <CommitModal
       :open="commitModalOpen"
       :t="t"
-      :repo-pull-busy="repoPullBusy"
       :defaults-loading="defaultsLoading"
       :repo-sync-text="repoSyncText()"
       :repo-sync="repoSync"
       :current-commit-details="currentCommitDetails"
       :current-commit="currentCommit"
+      :repo-info="repoInfo"
+      :repo-action-busy="repoActionBusy"
+      :repo-progress="repoProgress"
+      :format-bytes="formatBytes"
+      :format-speed="formatSpeed"
+      :format-duration="formatDuration"
       @close="closeCommitModal"
+      @clone="cloneRepository"
       @pull="pullRepository"
+      @submodules="updateRepoSubmodules"
+      @delete-repo-only="deleteRepository('repo_only')"
+      @delete-repo-with-out="deleteRepository('repo_with_out')"
+      @git-url-input="updateRepoUrlInput"
     />
     <DebloatModal
       :open="debloatModalOpen"

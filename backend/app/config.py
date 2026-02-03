@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     data_dir: str = "/data"
     logs_dir: str = "/data/logs"
     source_commit: str = "unknown"
+    repo_url_default: str = "https://github.com/salvogiangri/UN1CA.git"
+    repo_ref_default: str = "sixteen"
 
     cors_origins: str = "*"
 

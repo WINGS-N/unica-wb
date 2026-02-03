@@ -15,6 +15,7 @@ from .config import settings
 from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
 from .firmware_progress import set_progress
+from .repo_progress import clear_progress as clear_repo_progress, set_progress as set_repo_progress
 from .mods_archive import validate_mods_archive
 from .models import BuildJob
 from .queue import redis_conn
@@ -64,6 +65,8 @@ _RE_BYTES = re.compile(
 )
 _RE_SPEED = re.compile(r"(?P<spd>\d+(?:\.\d+)?)\s*(?P<su>[KMGTP]?i?B)/s", re.IGNORECASE)
 _RE_ELAPSED_ETA = re.compile(r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)<(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
+_RE_GIT_PERCENT = re.compile(r"(\d{1,3})%")
+_RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B/s)", re.IGNORECASE)
 
 
 def _guess_fw_key(text: str, known_keys: list[str]) -> str:
@@ -124,6 +127,102 @@ def _parse_hms(value: str) -> int:
         hh, mm, ss = parts
         return hh * 3600 + mm * 60 + ss
     return 0
+
+
+def _repo_set_progress(payload: dict):
+    set_repo_progress({"scope": "repo", **payload})
+
+
+def _repo_root_dir() -> Path:
+    base = Path(settings.un1ca_root)
+    nested = base / "UN1CA"
+    if (base / ".git").is_dir() or (base / "target").is_dir():
+        return base
+    if (nested / ".git").is_dir() or (nested / "target").is_dir():
+        return nested
+    return base
+
+
+def _repo_progress_from_line(line: str, started_at: float) -> dict:
+    pct = None
+    m_pct = _RE_GIT_PERCENT.search(line or "")
+    if m_pct:
+        try:
+            pct = max(0, min(100, int(m_pct.group(1))))
+        except Exception:
+            pct = None
+
+    speed_bps = None
+    m_speed = _RE_GIT_SPEED.search(line or "")
+    if m_speed:
+        try:
+            speed_bps = _to_bytes(float(m_speed.group(1)), m_speed.group(2).replace("/s", ""))
+        except Exception:
+            speed_bps = None
+
+    elapsed = max(0, int(time.time() - started_at))
+    eta = None
+    if pct and pct > 0 and pct < 100:
+        eta = int((elapsed * (100 - pct)) / pct)
+
+    out = {"elapsed_sec": elapsed}
+    if pct is not None:
+        out["percent"] = pct
+    if speed_bps is not None:
+        out["speed_bps"] = speed_bps
+    if eta is not None:
+        out["eta_sec"] = max(0, eta)
+    return out
+
+
+def _stream_command_with_progress(
+    command: list[str],
+    *,
+    log_file: Path,
+    env: dict,
+    stage: str,
+    title: str,
+    on_started=None,
+) -> int:
+    started_at = time.time()
+    _repo_set_progress({"type": "progress", "status": "running", "stage": stage, "title": title, "percent": 0, "elapsed_sec": 0})
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        env=env,
+        text=True,
+        bufsize=0,
+    )
+    if on_started:
+        on_started(proc.pid)
+    assert proc.stdout
+    with log_file.open("ab") as lf:
+        while True:
+            chunk = proc.stdout.read(4096)
+            if chunk == "":
+                break
+            lf.write(chunk.encode("utf-8", errors="ignore"))
+            lf.flush()
+            for line in re.split(r"[\r\n]+", chunk):
+                text = line.strip()
+                if not text:
+                    continue
+                payload = _repo_progress_from_line(text, started_at)
+                _repo_set_progress(
+                    {
+                        "type": "progress",
+                        "status": "running",
+                        "stage": stage,
+                        "title": title,
+                        "message": text,
+                        **payload,
+                    }
+                )
+    rc = proc.wait()
+    if on_started:
+        on_started(None)
+    return rc
 
 
 class _FirmwareProgressTracker:
@@ -261,6 +360,18 @@ def _run_operation_job(job_id: str, operation):
         db.close()
 
 
+def _set_job_pid(job_id: str, pid: int | None):
+    db = SessionLocal()
+    try:
+        job = db.get(BuildJob, job_id)
+        if not job:
+            return
+        job.process_pid = pid
+        db.commit()
+    finally:
+        db.close()
+
+
 def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
     # Extract FW from ODIN cache into out/fw, always with --force for consistent result.
     def _op(log_file: Path):
@@ -348,6 +459,162 @@ def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
                 lf.write(f"[delete] removed file: {target}\n".encode("utf-8"))
 
     _run_operation_job(job_id, _delete)
+
+
+def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
+    # Clone/update repo with recurse-submodules, same behavior as old init repo-sync.
+    def _op(log_file: Path):
+        root = _repo_root_dir()
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        root.mkdir(parents=True, exist_ok=True)
+        repo_dir = root
+        clear_repo_progress()
+
+        db = SessionLocal()
+        try:
+            job = db.get(BuildJob, job_id)
+            if job:
+                job.process_pid = None
+                db.commit()
+        finally:
+            db.close()
+
+        keep_out_src = repo_dir / "out"
+        keep_out_tmp = Path(settings.data_dir) / "tmp-repo-ops" / f"{job_id}-out"
+        if keep_out_src.exists():
+            keep_out_tmp.parent.mkdir(parents=True, exist_ok=True)
+            if keep_out_tmp.exists():
+                shutil.rmtree(keep_out_tmp, ignore_errors=True)
+            shutil.move(str(keep_out_src), str(keep_out_tmp))
+
+        if repo_dir.exists():
+            shutil.rmtree(repo_dir, ignore_errors=True)
+        repo_dir.mkdir(parents=True, exist_ok=True)
+
+        rc = _stream_command_with_progress(
+            ["git", "clone", "--progress", "--recurse-submodules", git_url, str(repo_dir)],
+            log_file=log_file,
+            env=env,
+            stage="clone",
+            title=f"Clone {git_url}",
+            on_started=lambda pid: _set_job_pid(job_id, pid),
+        )
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, ["git", "clone"])
+
+        setup_cmd = (
+            f"cd {shlex.quote(str(repo_dir))} && "
+            "git -c safe.directory=* fetch --all --tags --prune && "
+            f"git -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
+            f"git -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
+            f"if git -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
+            f"git -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
+            "git -c safe.directory=* submodule sync --recursive && "
+            "git -c safe.directory=* submodule update --init --recursive --jobs 8"
+        )
+        rc = _stream_command_with_progress(
+            ["bash", "-lc", setup_cmd],
+            log_file=log_file,
+            env=env,
+            stage="submodules",
+            title=f"Checkout {git_ref} and sync submodules",
+            on_started=lambda pid: _set_job_pid(job_id, pid),
+        )
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, ["bash", "-lc", setup_cmd])
+        if keep_out_tmp.exists():
+            dst_out = repo_dir / "out"
+            if dst_out.exists():
+                shutil.rmtree(dst_out, ignore_errors=True)
+            shutil.move(str(keep_out_tmp), str(dst_out))
+        _repo_set_progress({"type": "progress", "status": "completed", "stage": "clone", "title": "Repository clone completed", "percent": 100})
+
+    _run_operation_job(job_id, _op)
+
+
+def run_repo_pull_job(job_id: str, git_ref: str):
+    def _op(log_file: Path):
+        root = _repo_root_dir()
+        if not (root / ".git").is_dir():
+            raise RuntimeError("Repository is not cloned yet")
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        clear_repo_progress()
+        cmd = (
+            f"cd {shlex.quote(str(root))} && "
+            "git -c safe.directory=* fetch --all --tags --prune && "
+            f"git -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
+            f"git -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
+            f"if git -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
+            f"git -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi"
+        )
+        rc = _stream_command_with_progress(
+            ["bash", "-lc", cmd],
+            log_file=log_file,
+            env=env,
+            stage="pull",
+            title=f"Update repository ({git_ref})",
+            on_started=lambda pid: _set_job_pid(job_id, pid),
+        )
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+        _repo_set_progress({"type": "progress", "status": "completed", "stage": "pull", "title": "Repository updated", "percent": 100})
+
+    _run_operation_job(job_id, _op)
+
+
+def run_repo_submodules_job(job_id: str):
+    def _op(log_file: Path):
+        root = _repo_root_dir()
+        if not (root / ".git").is_dir():
+            raise RuntimeError("Repository is not cloned yet")
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        clear_repo_progress()
+        cmd = (
+            f"cd {shlex.quote(str(root))} && "
+            "git -c safe.directory=* submodule sync --recursive && "
+            "git -c safe.directory=* submodule update --init --recursive --jobs 8"
+        )
+        rc = _stream_command_with_progress(
+            ["bash", "-lc", cmd],
+            log_file=log_file,
+            env=env,
+            stage="submodules",
+            title="Update submodules",
+            on_started=lambda pid: _set_job_pid(job_id, pid),
+        )
+        if rc != 0:
+            raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+        _repo_set_progress({"type": "progress", "status": "completed", "stage": "submodules", "title": "Submodules updated", "percent": 100})
+
+    _run_operation_job(job_id, _op)
+
+
+def run_repo_delete_job(job_id: str, mode: str = "repo_only"):
+    def _op(log_file: Path):
+        root = _repo_root_dir()
+        clear_repo_progress()
+        with log_file.open("ab") as lf:
+            lf.write(f"[repo-delete] mode={mode} path={root}\n".encode("utf-8"))
+            lf.flush()
+        if root.exists():
+            if mode == "repo_with_out":
+                shutil.rmtree(root, ignore_errors=True)
+                root.mkdir(parents=True, exist_ok=True)
+            else:
+                for item in root.iterdir():
+                    if item.name == "out":
+                        continue
+                    if item.is_dir():
+                        shutil.rmtree(item, ignore_errors=True)
+                    else:
+                        item.unlink(missing_ok=True)
+        title = "Repository removed with out" if mode == "repo_with_out" else "Repository removed, out preserved"
+        _repo_set_progress({"type": "progress", "status": "completed", "stage": "delete", "title": title, "percent": 100})
+
+    _run_operation_job(job_id, _op)
 
 
 def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):

@@ -54,3 +54,7 @@ class BuildJobRead(BaseModel):
 
 class StopJobRequest(BaseModel):
     signal_type: str = Field(default="sigterm", pattern="^(sigterm|sigkill)$")
+
+
+class RepoConfigUpdate(BaseModel):
+    git_url: str = Field(min_length=8, max_length=512)
