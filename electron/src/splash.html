@@ -1,0 +1,511 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UN1CA Web Builder</title>
+  <style>
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Noto Sans", sans-serif;
+      color: #e2e8f0;
+      background: transparent;
+      overflow: hidden;
+    }
+    html { overflow: hidden; }
+
+    .wrap {
+      height: 100vh;
+      display: flex;
+      align-items: stretch;
+      justify-content: stretch;
+      padding: 0;
+    }
+
+    .card {
+      width: 100%;
+      height: 100%;
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      border-radius: 18px;
+      background: radial-gradient(circle at 20% 20%, rgba(30, 41, 59, 0.995) 0%, rgba(15, 23, 42, 0.995) 55%, rgba(2, 6, 23, 0.995) 100%);
+      box-shadow: none;
+      padding: 24px;
+      box-sizing: border-box;
+      display: flex;
+      flex-direction: column;
+    }
+    .drag-zone {
+      -webkit-app-region: drag;
+      user-select: none;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 22px;
+    }
+
+    p {
+      margin: 8px 0 0;
+      color: #94a3b8;
+      font-size: 13px;
+    }
+
+    .line {
+      margin-top: 18px;
+      font-size: 14px;
+      color: #cbd5e1;
+      min-height: 22px;
+    }
+    .line-wrap {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .pct {
+      font-size: 12px;
+      color: #7dd3fc;
+      min-width: 44px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .bar {
+      margin-top: 10px;
+      height: 10px;
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(30, 41, 59, 0.8);
+      border: 1px solid rgba(100, 116, 139, 0.5);
+    }
+    .clone-wrap { margin-top: 8px; display: none; }
+    .clone-wrap.show { display: block; }
+    .clone-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      font-size: 11px;
+      color: #93c5fd;
+      margin-bottom: 4px;
+    }
+    .clone-msg {
+      font-size: 11px;
+      color: #94a3b8;
+      margin-top: 4px;
+      min-height: 16px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .bar.clone { height: 8px; margin-top: 0; }
+    .fill.clone { background: linear-gradient(90deg, #34d399, #22c55e, #16a34a); }
+
+    .fill {
+      width: 1%;
+      height: 100%;
+      background: linear-gradient(90deg, #22d3ee, #38bdf8, #0ea5e9);
+      transition: width 180ms ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .fill::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background: linear-gradient(90deg, transparent, rgba(255,255,255,.25), transparent);
+      transform: translateX(-100%);
+      animation: shine 1.4s infinite;
+    }
+    @keyframes shine {
+      to { transform: translateX(100%); }
+    }
+
+    .meta {
+      margin-top: 10px;
+      font-size: 12px;
+      color: #94a3b8;
+      min-height: 18px;
+    }
+
+    .error {
+      margin-top: 14px;
+      border: 1px solid rgba(239, 68, 68, 0.6);
+      background: rgba(239, 68, 68, 0.1);
+      border-radius: 10px;
+      padding: 10px;
+      color: #fecaca;
+      font-size: 12px;
+      white-space: pre-wrap;
+      display: none;
+    }
+    .logs {
+      margin-top: 10px;
+      border: 1px solid rgba(71, 85, 105, 0.7);
+      border-radius: 10px;
+      background: rgba(2, 6, 23, 0.7);
+      color: #93c5fd;
+      font-size: 11px;
+      line-height: 1.45;
+      flex: 1;
+      min-height: 140px;
+      overflow: auto;
+      padding: 8px;
+      white-space: pre-wrap;
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+    .logs::-webkit-scrollbar { width: 0; height: 0; display: none; }
+
+    .actions {
+      margin-top: 12px;
+      display: none;
+    }
+    .overlay {
+      position: fixed;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(2, 6, 23, 0.32);
+      backdrop-filter: blur(6px);
+      z-index: 20;
+    }
+    .overlay.show { display: flex; }
+    .modal {
+      width: min(420px, calc(100% - 32px));
+      border: 1px solid rgba(100, 116, 139, 0.7);
+      border-radius: 12px;
+      background: rgba(15, 23, 42, 0.98);
+      box-shadow: 0 20px 48px rgba(2, 6, 23, 0.55);
+      padding: 14px;
+    }
+    .modal-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 700;
+      color: #e2e8f0;
+    }
+    .modal-text {
+      margin: 8px 0 0;
+      font-size: 12px;
+      color: #94a3b8;
+    }
+    .modal-input {
+      margin-top: 10px;
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid rgba(100, 116, 139, 0.7);
+      border-radius: 10px;
+      background: rgba(2, 6, 23, 0.75);
+      color: #e2e8f0;
+      padding: 9px 10px;
+      outline: none;
+      font-size: 13px;
+    }
+    .modal-input:focus {
+      border-color: #38bdf8;
+      box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.22);
+    }
+    .modal-row {
+      margin-top: 12px;
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .btn-secondary {
+      border-color: rgba(100, 116, 139, 0.7);
+      background: rgba(30, 41, 59, 0.65);
+      color: #cbd5e1;
+    }
+
+    button {
+      border: 1px solid rgba(56, 189, 248, 0.6);
+      border-radius: 10px;
+      background: rgba(14, 165, 233, 0.15);
+      color: #e0f2fe;
+      padding: 8px 14px;
+      cursor: pointer;
+    }
+
+    button:hover { background: rgba(14, 165, 233, 0.25); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <div class="drag-zone">
+        <h1 id="title">UN1CA Web Builder</h1>
+        <p id="subtitle">Starting services and checking runtime health</p>
+      </div>
+      <div class="line-wrap">
+        <div id="message" class="line">Starting...</div>
+        <div id="pct" class="pct">0%</div>
+      </div>
+      <div class="bar"><div id="fill" class="fill"></div></div>
+      <div id="cloneWrap" class="clone-wrap">
+        <div class="clone-head">
+          <span>Init clone</span>
+          <span id="clonePct">0%</span>
+          <span id="cloneSpeed">0 B/s</span>
+        </div>
+        <div class="bar clone"><div id="cloneFill" class="fill clone"></div></div>
+        <div id="cloneMsg" class="clone-msg"></div>
+      </div>
+      <div id="detail" class="meta">Preparing startup</div>
+      <div id="meta" class="meta"></div>
+      <pre id="logs" class="logs">[boot] waiting for progress events...</pre>
+
+      <div id="error" class="error"></div>
+      <div id="actions" class="actions"><button id="retry">Retry startup</button></div>
+    </div>
+  </div>
+  <div id="sudoOverlay" class="overlay">
+    <div class="modal">
+      <h3 id="sudoTitle" class="modal-title">Rootful Docker access</h3>
+      <p id="sudoText" class="modal-text">Enter your sudo password to continue startup</p>
+      <input id="sudoInput" class="modal-input" type="password" autocomplete="current-password" placeholder="sudo password" />
+      <div class="modal-row">
+        <button id="sudoCancel" class="btn-secondary">Cancel</button>
+        <button id="sudoSubmit">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const splashMode = new URLSearchParams(window.location.search).get('mode') || 'startup'
+    const stageWeight = {
+      check: 0.10,
+      seed: 0.20,
+      pull: 0.30,
+      compose: 0.20,
+      health: 0.20,
+      shutdown: 1.00
+    }
+    const stageStart = {
+      check: 0,
+      seed: 10,
+      pull: 30,
+      compose: 60,
+      health: 80,
+      shutdown: 0
+    }
+
+    const messageEl = document.getElementById('message')
+    const subtitleEl = document.getElementById('subtitle')
+    const pctEl = document.getElementById('pct')
+    const fillEl = document.getElementById('fill')
+    const detailEl = document.getElementById('detail')
+    const metaEl = document.getElementById('meta')
+    const cloneWrapEl = document.getElementById('cloneWrap')
+    const clonePctEl = document.getElementById('clonePct')
+    const cloneSpeedEl = document.getElementById('cloneSpeed')
+    const cloneFillEl = document.getElementById('cloneFill')
+    const cloneMsgEl = document.getElementById('cloneMsg')
+    const logsEl = document.getElementById('logs')
+    const errorEl = document.getElementById('error')
+    const actionsEl = document.getElementById('actions')
+    const retryBtn = document.getElementById('retry')
+    const sudoOverlay = document.getElementById('sudoOverlay')
+    const sudoTitle = document.getElementById('sudoTitle')
+    const sudoText = document.getElementById('sudoText')
+    const sudoInput = document.getElementById('sudoInput')
+    const sudoCancel = document.getElementById('sudoCancel')
+    const sudoSubmit = document.getElementById('sudoSubmit')
+
+    if (splashMode === 'shutdown') {
+      messageEl.textContent = 'Stopping...'
+      subtitleEl.textContent = 'Stopping services and cleaning Docker resources'
+      detailEl.textContent = 'Stopping services and removing leftover containers'
+    }
+
+    function formatBytes(bytes) {
+      const value = Number(bytes || 0)
+      if (!value) return '0 B'
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']
+      const idx = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+      const scaled = value / (1024 ** idx)
+      return `${scaled.toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`
+    }
+
+    const stageDetail = {
+      check: 'Checking Docker access and daemon availability',
+      seed: 'Loading bundled seed images from local package',
+      pull: 'Checking newer image versions in registry',
+      compose: 'Creating and starting Docker compose services',
+      health: 'Waiting until API and UI respond',
+      shutdown: 'Stopping services and removing leftover containers'
+    }
+
+    let shownPercent = 0
+    let targetPercent = 0
+    let rafId = null
+
+    function animateBar() {
+      const diff = targetPercent - shownPercent
+      if (Math.abs(diff) < 0.2) {
+        shownPercent = targetPercent
+      } else {
+        shownPercent += diff * 0.28
+      }
+      const p = Math.max(1, Math.min(100, shownPercent))
+      fillEl.style.width = `${p}%`
+      pctEl.textContent = `${Math.round(p)}%`
+      if (Math.abs(targetPercent - shownPercent) >= 0.2) {
+        rafId = requestAnimationFrame(animateBar)
+      } else {
+        rafId = null
+      }
+    }
+
+    function setProgressPercent(total) {
+      targetPercent = Math.max(1, Math.min(100, Number(total || 0)))
+      if (!rafId) {
+        rafId = requestAnimationFrame(animateBar)
+      }
+    }
+
+    function setBar(stage, stageProgress) {
+      const start = stageStart[stage] ?? 0
+      const weight = stageWeight[stage] ?? 0
+      const local = Math.max(0, Math.min(100, Number(stageProgress || 0)))
+      const total = Math.max(1, Math.min(100, start + (weight * local)))
+      setProgressPercent(total)
+    }
+
+    function applyPayload(payload) {
+      if (!payload) return
+      const msg = payload?.message || 'Starting...'
+      messageEl.textContent = msg
+      subtitleEl.textContent = payload?.stage === 'shutdown'
+        ? 'Stopping services and cleaning Docker resources'
+        : 'Starting services and checking runtime health'
+      detailEl.textContent = payload?.detail || stageDetail[payload?.stage] || 'Working'
+      if (typeof payload?.totalProgress === 'number') {
+        const total = Math.max(1, Math.min(100, Number(payload.totalProgress)))
+        setProgressPercent(total)
+      } else {
+        setBar(payload?.stage, payload?.progress)
+      }
+
+      if (payload?.downloaded || payload?.total || payload?.speed) {
+        const downloaded = formatBytes(payload.downloaded || 0)
+        const total = formatBytes(payload.total || 0)
+        const speed = formatBytes(payload.speed || 0)
+        metaEl.textContent = `${downloaded} / ${total}  •  ${speed}/s`
+      } else {
+        metaEl.textContent = ''
+      }
+
+      if (payload?.message) {
+        appendLog(payload.message)
+      }
+
+      if (payload?.clone_active) {
+        cloneWrapEl.classList.add('show')
+        const cp = Math.max(0, Math.min(100, Number(payload.clone_percent || 0)))
+        cloneFillEl.style.width = `${cp}%`
+        clonePctEl.textContent = `${Math.round(cp)}%`
+        cloneSpeedEl.textContent = `${formatBytes(payload.clone_speed || 0)}/s`
+        cloneMsgEl.textContent = payload.clone_message || ''
+      } else if (payload?.clone_active === false) {
+        cloneWrapEl.classList.remove('show')
+      }
+    }
+
+    function appendLog(text) {
+      const ts = new Date().toLocaleTimeString()
+      const line = `[${ts}] ${text}`
+      const prev = logsEl.textContent ? `${logsEl.textContent}\n` : ''
+      const next = `${prev}${line}`.split('\n').slice(-150).join('\n')
+      logsEl.textContent = next
+      logsEl.scrollTop = logsEl.scrollHeight
+    }
+
+    if (window.startupApi?.onProgress) {
+      window.startupApi.onProgress((payload) => {
+        applyPayload(payload)
+      })
+    } else {
+      errorEl.style.display = 'block'
+      errorEl.textContent = 'startupApi bridge is not available'
+    }
+
+    if (window.startupApi?.onError) {
+      window.startupApi.onError((payload) => {
+        errorEl.style.display = 'block'
+        actionsEl.style.display = 'block'
+        errorEl.textContent = payload?.message || 'Unknown startup error'
+      })
+    }
+
+    if (window.startupApi?.onSudoRequest) {
+      window.startupApi.onSudoRequest((payload) => {
+        sudoTitle.textContent = payload?.title || 'Rootful Docker access'
+        sudoText.textContent = payload?.message || 'Enter your sudo password to continue startup'
+        sudoInput.value = ''
+        sudoOverlay.classList.add('show')
+        setTimeout(() => sudoInput.focus(), 10)
+      })
+    }
+
+    function closeSudoModal() {
+      sudoOverlay.classList.remove('show')
+      sudoInput.value = ''
+    }
+
+    sudoSubmit.addEventListener('click', () => {
+      window.startupApi?.submitSudoPassword?.(sudoInput.value || '')
+      closeSudoModal()
+    })
+    sudoCancel.addEventListener('click', () => {
+      window.startupApi?.cancelSudoPassword?.()
+      closeSudoModal()
+    })
+    sudoInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault()
+        sudoSubmit.click()
+      } else if (event.key === 'Escape') {
+        event.preventDefault()
+        sudoCancel.click()
+      }
+    })
+
+    retryBtn.addEventListener('click', async () => {
+      errorEl.style.display = 'none'
+      actionsEl.style.display = 'none'
+      metaEl.textContent = ''
+      messageEl.textContent = 'Retrying startup...'
+      await window.startupApi.retry()
+    })
+
+    // If progress event was sent before renderer listeners were attached, restore it from main process
+    ;(async () => {
+      try {
+        const tail = await window.startupApi.getLogTail()
+        if (Array.isArray(tail) && tail.length) {
+          logsEl.textContent = tail.slice(-150).join('\n')
+          logsEl.scrollTop = logsEl.scrollHeight
+        }
+        const payload = await window.startupApi.getLastProgress()
+        if (!payload) return
+        applyPayload(payload)
+      } catch {}
+    })()
+
+    // Safety net for dev mode: refresh from main process even if event missed
+    setInterval(async () => {
+      try {
+        const tail = await window.startupApi?.getLogTail?.()
+        if (Array.isArray(tail) && tail.length) {
+          logsEl.textContent = tail.slice(-150).join('\n')
+          logsEl.scrollTop = logsEl.scrollHeight
+        }
+        const payload = await window.startupApi?.getLastProgress?.()
+        if (payload) applyPayload(payload)
+      } catch {}
+    }, 700)
+  </script>
+</body>
+</html>

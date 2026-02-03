@@ -1,0 +1,10 @@
+node_modules/
+.pnpm-store/
+dist/
+release/
+out/
+*.log
+seed-images/*.tar
+seed-images/*.tar.zst
+seed-images/manifest.json
+!seed-images/manifest.example.json

@@ -1,0 +1,143 @@
+services:
+  repo-sync:
+    image: alpine/git:2.47.2
+    restart: "no"
+    environment:
+      GIT_URL: ${GIT_URL:-https://github.com/salvogiangri/UN1CA.git}
+      GIT_REF: ${GIT_REF:-sixteen}
+    entrypoint: ["/bin/sh", "-c"]
+    command: >
+      set -eu;
+      REPO_DIR=/workspace/UN1CA;
+      if [ ! -d "$$REPO_DIR/.git" ]; then
+        git clone --recurse-submodules "$$GIT_URL" "$$REPO_DIR";
+      fi;
+      cd "$$REPO_DIR";
+      git fetch --all --tags --prune;
+      git fetch origin "$$GIT_REF" --prune || true;
+      git checkout -f "$$GIT_REF";
+      if git rev-parse --verify "origin/$$GIT_REF" >/dev/null 2>&1; then
+        git reset --hard "origin/$$GIT_REF";
+      fi;
+      git submodule sync --recursive;
+      git submodule update --init --recursive --jobs 8
+    volumes:
+      - un1ca-src:/workspace
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  unica-wb-api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: api
+    image: ${IMAGE_API:-unica-wb-api:local}
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/app.db
+      UN1CA_ROOT: /workspace/UN1CA
+      OUT_DIR: /workspace/UN1CA/out
+      LOGS_DIR: /data/logs
+      CORS_ORIGINS: "*"
+    depends_on:
+      repo-sync:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    volumes:
+      - shared-data:/data
+      - un1ca-src:/workspace
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/healthz"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "0.0.0.0:8000:8000"
+    stop_grace_period: 30s
+
+  unica-wb-worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      target: worker
+    image: ${IMAGE_WORKER:-unica-wb-worker:local}
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: sqlite:////data/app.db
+      UN1CA_ROOT: /workspace/UN1CA
+      OUT_DIR: /workspace/UN1CA/out
+      LOGS_DIR: /data/logs
+    depends_on:
+      repo-sync:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      unica-wb-api:
+        condition: service_started
+    volumes:
+      - shared-data:/data
+      - un1ca-src:/workspace
+    # Required for mount/fuse operations in extract_fw.sh/build scripts.
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    devices:
+      - /dev/loop-control:/dev/loop-control
+      - /dev/loop0:/dev/loop0
+      - /dev/loop1:/dev/loop1
+      - /dev/loop2:/dev/loop2
+      - /dev/loop3:/dev/loop3
+      - /dev/loop4:/dev/loop4
+      - /dev/loop5:/dev/loop5
+      - /dev/loop6:/dev/loop6
+      - /dev/loop7:/dev/loop7
+    device_cgroup_rules:
+      - "b 7:* rmw"
+    stop_grace_period: 600s
+
+  unica-wb-frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: ${IMAGE_FRONTEND:-unica-wb-frontend:local}
+    restart: unless-stopped
+    depends_on:
+      unica-wb-api:
+        condition: service_healthy
+    ports:
+      - "0.0.0.0:8080:80"
+    stop_grace_period: 15s
+
+  mariadb:
+    image: mariadb:11
+    profiles: ["mariadb"]
+    restart: unless-stopped
+    environment:
+      MARIADB_DATABASE: un1ca
+      MARIADB_USER: un1ca
+      MARIADB_PASSWORD: un1ca
+      MARIADB_ROOT_PASSWORD: root
+    volumes:
+      - mariadb-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-proot"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  un1ca-src:
+  shared-data:
+  mariadb-data:

@@ -1,0 +1,23 @@
+services:
+  repo-sync:
+    image: alpine:3.20
+    restart: "no"
+    command: ["sh", "-lc", "echo 'repo-sync disabled in local bind-mount mode'"]
+
+  unica-wb-api:
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - shared-data:/data
+      - ${LOCAL_UN1CA_PATH:?Set LOCAL_UN1CA_PATH in unica-wb/.env for local bind-mount mode}:/workspace/UN1CA
+
+  unica-wb-worker:
+    depends_on:
+      redis:
+        condition: service_healthy
+      unica-wb-api:
+        condition: service_started
+    volumes:
+      - shared-data:/data
+      - ${LOCAL_UN1CA_PATH:?Set LOCAL_UN1CA_PATH in unica-wb/.env for local bind-mount mode}:/workspace/UN1CA

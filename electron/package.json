@@ -1,0 +1,70 @@
+{
+  "name": "unica-wb-electron",
+  "version": "0.0.1",
+  "private": true,
+  "description": "UN1CA Web Builder desktop launcher",
+  "homepage": "https://github.com/WINGS-N/UN1CA",
+  "author": {
+    "name": "WINGS-N",
+    "email": "wings-n@users.noreply.github.com"
+  },
+  "type": "module",
+  "main": "src/main.js",
+  "scripts": {
+    "dev": "electron .",
+    "seed:export": "./scripts/export-seed-images.sh",
+    "ci:pack:linux": "electron-builder --linux AppImage deb",
+    "ci:pack:win": "electron-builder --win nsis portable",
+    "docker:pack:linux": "./scripts/build-docker.sh linux",
+    "docker:pack:win": "./scripts/build-docker.sh win",
+    "docker:pack:all": "./scripts/build-docker.sh all",
+    "pack:linux": "electron-builder --linux AppImage deb",
+    "pack:win": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^34.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "wings.unica.wb",
+    "productName": "UN1CA Web Builder",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../docker-compose.yml",
+        "to": "docker-compose.yml"
+      },
+      {
+        "from": "../docker-compose.local-repo.yml",
+        "to": "docker-compose.local-repo.yml"
+      },
+      {
+        "from": "seed-images",
+        "to": "seed-images"
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "maintainer": "WINGS-N <wings-n@users.noreply.github.com>",
+      "category": "Development"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  },
+  "packageManager": "pnpm@10.6.2+sha512.47870716bea1572b53df34ad8647b42962bc790ce2bf4562ba0f643237d7302a3d6a8ecef9e4bdfc01d23af1969aa90485d4cebb0b9638fa5ef1daef656f6c1b",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron"
+    ]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "images": [
+    {
+      "archive": "unica-wb-api-local.tar",
+      "local_tag": "unica-wb-api:local",
+      "remote": "ghcr.io/wings-n/unica-wb-api:latest"
+    },
+    {
+      "archive": "unica-wb-worker-local.tar",
+      "local_tag": "unica-wb-worker:local",
+      "remote": "ghcr.io/wings-n/unica-wb-worker:latest"
+    },
+    {
+      "archive": "unica-wb-frontend-local.tar",
+      "local_tag": "unica-wb-frontend:local",
+      "remote": "ghcr.io/wings-n/unica-wb-frontend:latest"
+    }
+  ]
+}
