@@ -212,81 +212,17 @@ jobs:
           path: electron/out
           if-no-files-found: error
 
-  build-electron-windows:
-    runs-on: windows-latest
-    needs:
-      - prep
-      - build-seed-images
-    defaults:
-      run:
-        working-directory: electron
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prep.outputs.version }}
-
-      - name: Set Electron version from tag
-        shell: pwsh
-        run: |
-          $version = "${{ needs.prep.outputs.version }}"
-          $version = $version -replace '^v',''
-          if ([string]::IsNullOrWhiteSpace($version)) { throw "Resolved Electron version is empty" }
-          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='${version}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'`n');"
-
-      - name: Download seed images
-        uses: actions/download-artifact@v4
-        with:
-          name: electron-seed-images
-          path: electron/seed-images
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
-
-      - name: Build Windows artifacts
-        run: pnpm run ci:pack:win
-
-      - name: Collect artifacts
-        run: |
-          if (Test-Path out) { Remove-Item -Recurse -Force out }
-          New-Item -ItemType Directory -Path out | Out-Null
-          Copy-Item -Recurse -Force dist\* out\
-
-      - name: Upload Windows artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: electron-windows
-          path: electron/out
-          if-no-files-found: error
-
   github-release:
     runs-on: ubuntu-22.04
     needs:
       - prep
       - build-electron-linux
-      - build-electron-windows
     steps:
       - name: Download Linux artifacts
         uses: actions/download-artifact@v4
         with:
           name: electron-linux
           path: release/linux
-
-      - name: Download Windows artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: electron-windows
-          path: release/windows
 
       - name: Cleanup duplicate debug assets
         shell: bash
@@ -301,4 +237,3 @@ jobs:
           generate_release_notes: true
           files: |
             release/linux/*
-            release/windows/*
