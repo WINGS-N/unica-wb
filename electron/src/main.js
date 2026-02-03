@@ -19,7 +19,7 @@ const COMPOSE_FILES_SOURCE = [
 let composeFiles = [...COMPOSE_FILES_SOURCE]
 let composeEnvFile = join(WB_ROOT, '.env')
 let composeCwd = WB_ROOT
-const COMPOSE_SERVICES = (process.env.ELECTRON_COMPOSE_SERVICES || 'repo-sync redis unica-wb-api unica-wb-worker unica-wb-frontend')
+const COMPOSE_SERVICES = (process.env.ELECTRON_COMPOSE_SERVICES || 'redis unica-wb-api unica-wb-worker unica-wb-frontend')
   .split(/\s+/)
   .filter(Boolean)
 const MANIFEST_CANDIDATES = [
@@ -804,56 +804,6 @@ async function composeUp() {
   // Mark compose as touched so we always try cleanup on app quit
   composeStarted = true
   let composePct = 5
-  let repoSyncContainerId = ''
-  let repoSyncActive = true
-  const seenRepoSyncLines = new Set()
-
-  async function pollRepoSyncProgress() {
-    if (!repoSyncActive) return
-    if (!repoSyncContainerId) {
-      const ids = await runDocker([
-        'ps',
-        '-aq',
-        '--filter',
-        `label=com.docker.compose.project=${COMPOSE_PROJECT}`,
-        '--filter',
-        'label=com.docker.compose.service=repo-sync'
-      ], { timeoutMs: 8000 }).catch(() => ({ stdout: '' }))
-      repoSyncContainerId = String(ids.stdout || '').trim().split('\n').filter(Boolean)[0] || ''
-      if (!repoSyncContainerId) return
-    }
-
-    const logs = await runDocker(['logs', '--tail', '120', repoSyncContainerId], { timeoutMs: 8000 }).catch(() => ({ stderr: '' }))
-    const lines = String(logs.stderr || '').split('\n').map((s) => s.trim()).filter(Boolean)
-    for (const line of lines) {
-      if (seenRepoSyncLines.has(line)) continue
-      seenRepoSyncLines.add(line)
-      if (seenRepoSyncLines.size > 800) {
-        const arr = Array.from(seenRepoSyncLines).slice(-500)
-        seenRepoSyncLines.clear()
-        for (const item of arr) seenRepoSyncLines.add(item)
-      }
-      emitProgress({
-        stage: 'compose',
-        progress: composePct,
-        totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-        message: `repo-sync: ${line}`
-      })
-    }
-
-    const state = await runDocker(['inspect', '-f', '{{.State.Status}}', repoSyncContainerId], { timeoutMs: 5000 })
-      .then((x) => String(x.stdout || '').trim())
-      .catch(() => '')
-    if (state === 'exited' || state === 'dead' || state === 'removing') {
-      repoSyncActive = false
-      emitProgress({
-        stage: 'compose',
-        progress: composePct,
-        totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-        message: 'repo-sync: completed'
-      })
-    }
-  }
 
   let pollStopped = false
   const poll = async () => {
@@ -861,7 +811,6 @@ async function composeUp() {
     const snap = await getComposeProgressSnapshot()
     composePct = Math.max(5, snap.pct)
     emitStartupProgress('compose', composePct, `Starting containers... ${snap.pct}%`, { detail: snap.detail })
-    await pollRepoSyncProgress()
   }
   const timer = setInterval(() => {
     poll().catch(() => {})
@@ -880,12 +829,6 @@ async function composeUp() {
       }
     })
     await poll().catch(() => {})
-    emitProgress({
-      stage: 'compose',
-      progress: composePct,
-      totalProgress: Math.round(50 + ((75 - 50) * (composePct / 100))),
-      message: 'repo-sync: completed'
-    })
     emitStartupProgress('compose', 100, 'Containers are started')
   } finally {
     pollStopped = true

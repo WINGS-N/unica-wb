@@ -9,8 +9,11 @@
 html,
 body,
 #app {
-  height: 100%;
-  overflow: hidden;
+  min-height: 100%;
+}
+
+body {
+  overflow-y: auto;
 }
 
 .modal-fade-enter-active,
