@@ -1,9 +1,4 @@
 services:
-  repo-sync:
-    image: alpine:3.20
-    restart: "no"
-    command: ["sh", "-lc", "echo 'repo-sync disabled in local bind-mount mode'"]
-
   unica-wb-api:
     depends_on:
       redis:

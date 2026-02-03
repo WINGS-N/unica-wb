@@ -1,16 +1,4 @@
 services:
-  repo-sync:
-    image: alpine/git:2.47.2
-    restart: "no"
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      set -eu;
-      REPO_DIR=/workspace/UN1CA;
-      mkdir -p "$$REPO_DIR";
-      echo "repo-sync init skipped; manage clone/pull from UI"
-    volumes:
-      - un1ca-src:/workspace
-
   redis:
     image: redis:7-alpine
     restart: unless-stopped
@@ -37,8 +25,6 @@ services:
       REPO_URL_DEFAULT: ${GIT_URL:-https://github.com/salvogiangri/UN1CA.git}
       REPO_REF_DEFAULT: ${GIT_REF:-sixteen}
     depends_on:
-      repo-sync:
-        condition: service_completed_successfully
       redis:
         condition: service_healthy
     volumes:
@@ -69,8 +55,6 @@ services:
       REPO_URL_DEFAULT: ${GIT_URL:-https://github.com/salvogiangri/UN1CA.git}
       REPO_REF_DEFAULT: ${GIT_REF:-sixteen}
     depends_on:
-      repo-sync:
-        condition: service_completed_successfully
       redis:
         condition: service_healthy
       unica-wb-api:
