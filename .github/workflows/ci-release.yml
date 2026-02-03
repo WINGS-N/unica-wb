@@ -1,9 +1,15 @@
-name: Release (vX.Y.Z)
+name: Release (tag)
 
 on:
   push:
     tags:
       - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag in vX.Y.Z format'
+        required: true
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -18,7 +24,6 @@ env:
 
 jobs:
   prep:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: ubuntu-22.04
     outputs:
       owner_lc: ${{ steps.vars.outputs.owner_lc }}
@@ -28,21 +33,24 @@ jobs:
         id: vars
         shell: bash
         run: |
-          if [[ ! "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Invalid release tag: ${GITHUB_REF_NAME}"
+          TAG_INPUT="${{ github.event.inputs.tag || '' }}"
+          TAG="${TAG_INPUT:-${GITHUB_REF_NAME}}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid release tag: $TAG"
             echo "Expected strict semver tag format: vX.Y.Z"
             exit 1
           fi
+          echo "version=$TAG" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
   build-docker-images:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: ubuntu-22.04
     needs: prep
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prep.outputs.version }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -63,6 +71,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:${{ needs.prep.outputs.version }}
+            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:latest
           cache-from: type=gha,scope=unica-wb-api
           cache-to: type=gha,scope=unica-wb-api,mode=max
 
@@ -75,6 +84,7 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:${{ needs.prep.outputs.version }}
+            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:latest
           cache-from: type=gha,scope=unica-wb-worker
           cache-to: type=gha,scope=unica-wb-worker,mode=max
 
@@ -86,11 +96,11 @@ jobs:
           push: true
           tags: |
             ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:${{ needs.prep.outputs.version }}
+            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:latest
           cache-from: type=gha,scope=unica-wb-frontend
           cache-to: type=gha,scope=unica-wb-frontend,mode=max
 
   build-seed-images:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: ubuntu-22.04
     needs:
       - prep
@@ -101,6 +111,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prep.outputs.version }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -137,9 +149,9 @@ jobs:
           if-no-files-found: error
 
   build-electron-linux:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: ubuntu-22.04
     needs:
+      - prep
       - build-seed-images
     defaults:
       run:
@@ -147,6 +159,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prep.outputs.version }}
+
+      - name: Set Electron version from tag
+        shell: bash
+        run: |
+          VERSION="${{ needs.prep.outputs.version }}"
+          VERSION="${VERSION#v}"
+          if [[ -z "$VERSION" ]]; then
+            echo "Resolved Electron version is empty"
+            exit 1
+          fi
+          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n');"
 
       - name: Download seed images
         uses: actions/download-artifact@v4
@@ -188,9 +213,9 @@ jobs:
           if-no-files-found: error
 
   build-electron-windows:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: windows-latest
     needs:
+      - prep
       - build-seed-images
     defaults:
       run:
@@ -198,6 +223,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prep.outputs.version }}
+
+      - name: Set Electron version from tag
+        shell: pwsh
+        run: |
+          $version = "${{ needs.prep.outputs.version }}"
+          $version = $version -replace '^v',''
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "Resolved Electron version is empty" }
+          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='${version}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'`n');"
 
       - name: Download seed images
         uses: actions/download-artifact@v4
@@ -235,7 +270,6 @@ jobs:
           if-no-files-found: error
 
   github-release:
-    if: ${{ !contains(github.event.head_commit.message || '', '[SKIP CI]') }}
     runs-on: ubuntu-22.04
     needs:
       - prep
@@ -253,6 +287,11 @@ jobs:
         with:
           name: electron-windows
           path: release/windows
+
+      - name: Cleanup duplicate debug assets
+        shell: bash
+        run: |
+          find release -type f \( -name 'builder-debug.yml' -o -name '*.blockmap' \) -delete
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2

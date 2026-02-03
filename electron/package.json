@@ -47,6 +47,7 @@
       }
     ],
     "linux": {
+      "artifactName": "unica-wb-${version}.${ext}",
       "target": [
         "AppImage",
         "deb"

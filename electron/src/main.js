@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, copyFileSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import http from 'node:http'
@@ -12,10 +12,13 @@ const WB_ROOT = app.isPackaged ? process.resourcesPath : resolve(__dirname, '..'
 const FRONTEND_URL = process.env.ELECTRON_FRONTEND_URL || 'http://127.0.0.1:8080'
 const API_HEALTH_URL = process.env.ELECTRON_API_HEALTH_URL || 'http://127.0.0.1:8000/api/v1/healthz'
 const COMPOSE_PROJECT = process.env.ELECTRON_COMPOSE_PROJECT || 'unica-wb'
-const COMPOSE_FILES = [
+const COMPOSE_FILES_SOURCE = [
   join(WB_ROOT, 'docker-compose.yml'),
   ...(process.env.ELECTRON_COMPOSE_LOCAL_REPO === '1' ? [join(WB_ROOT, 'docker-compose.local-repo.yml')] : [])
 ]
+let composeFiles = [...COMPOSE_FILES_SOURCE]
+let composeEnvFile = join(WB_ROOT, '.env')
+let composeCwd = WB_ROOT
 const COMPOSE_SERVICES = (process.env.ELECTRON_COMPOSE_SERVICES || 'repo-sync redis unica-wb-api unica-wb-worker unica-wb-frontend')
   .split(/\s+/)
   .filter(Boolean)
@@ -195,7 +198,7 @@ function createMainWindow() {
 function runCommand(command, args, options = {}) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(command, args, {
-      cwd: options.cwd || WB_ROOT,
+      cwd: options.cwd || composeCwd || WB_ROOT,
       env: { ...process.env, ...(options.env || {}) },
       shell: false
     })
@@ -594,14 +597,50 @@ async function maybeUpdateImages(manifest) {
 }
 
 function composeArgs(action, extra = []) {
+  const envFileArgs = composeEnvFile ? ['--env-file', composeEnvFile] : []
   return [
     'compose',
     '-p',
     COMPOSE_PROJECT,
-    ...COMPOSE_FILES.flatMap((file) => ['-f', file]),
+    ...envFileArgs,
+    ...composeFiles.flatMap((file) => ['-f', file]),
     action,
     ...extra
   ]
+}
+
+function prepareComposeRuntimeFiles() {
+  // В AppImage resources лежат в FUSE mount, root-команды не всегда читают их.
+  // In AppImage resources are on FUSE mount, root commands may fail to read them.
+  if (!app.isPackaged) {
+    composeFiles = [...COMPOSE_FILES_SOURCE]
+    composeEnvFile = existsSync(join(WB_ROOT, '.env')) ? join(WB_ROOT, '.env') : ''
+    composeCwd = WB_ROOT
+    return
+  }
+
+  const runtimeDir = join(app.getPath('userData'), 'runtime-compose')
+  mkdirSync(runtimeDir, { recursive: true })
+
+  composeFiles = []
+  for (const src of COMPOSE_FILES_SOURCE) {
+    if (!existsSync(src)) continue
+    const base = src.endsWith('docker-compose.local-repo.yml') ? 'docker-compose.local-repo.yml' : 'docker-compose.yml'
+    const dst = join(runtimeDir, base)
+    copyFileSync(src, dst)
+    composeFiles.push(dst)
+  }
+
+  const srcEnv = join(WB_ROOT, '.env')
+  if (existsSync(srcEnv)) {
+    const dstEnv = join(runtimeDir, '.env')
+    copyFileSync(srcEnv, dstEnv)
+    composeEnvFile = dstEnv
+  } else {
+    composeEnvFile = ''
+  }
+
+  composeCwd = runtimeDir
 }
 
 function composeContainerWeight(statusText) {
@@ -874,6 +913,7 @@ async function startup() {
   startupRunning = true
 
   try {
+    prepareComposeRuntimeFiles()
     emitStartupProgress('check', 5, 'Preparing startup sequence')
     emitStartupProgress('check', 20, 'Checking Docker daemon')
     await configureDockerAccess()
