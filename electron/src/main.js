@@ -465,6 +465,79 @@ async function dockerImageExists(tag) {
   }
 }
 
+async function dockerImageId(tag) {
+  try {
+    const out = await runDocker(['image', 'inspect', '--format', '{{.Id}}', tag])
+    const id = String(out.stdout || '').trim()
+    return id || ''
+  } catch {
+    return ''
+  }
+}
+
+function repoFromImageRef(ref) {
+  const input = String(ref || '').trim()
+  if (!input) return ''
+  const noDigest = input.split('@')[0]
+  const slash = noDigest.lastIndexOf('/')
+  const colon = noDigest.lastIndexOf(':')
+  if (colon > slash) return noDigest.slice(0, colon)
+  return noDigest
+}
+
+async function dockerLocalRepoDigest(ref, repoHint = '') {
+  try {
+    const out = await runDocker(['image', 'inspect', '--format', '{{json .RepoDigests}}', ref])
+    const arr = JSON.parse(String(out.stdout || '[]').trim() || '[]')
+    if (!Array.isArray(arr)) return ''
+    const repo = repoHint || repoFromImageRef(ref)
+    const hit = arr.find((x) => {
+      const s = String(x || '')
+      return repo ? s.startsWith(`${repo}@sha256:`) : s.includes('@sha256:')
+    })
+    if (!hit) return ''
+    const idx = String(hit).indexOf('@')
+    return idx >= 0 ? String(hit).slice(idx + 1) : ''
+  } catch {
+    return ''
+  }
+}
+
+function pickDigestFromManifestVerbose(payload) {
+  if (!payload) return ''
+  const preferPlatform = (items) => {
+    if (!Array.isArray(items) || items.length === 0) return ''
+    const preferred = items.find((x) => {
+      const os = String(x?.Descriptor?.platform?.os || x?.Platform?.os || '').toLowerCase()
+      const arch = String(x?.Descriptor?.platform?.architecture || x?.Platform?.architecture || '').toLowerCase()
+      return os === 'linux' && arch === 'amd64'
+    })
+    const selected = preferred || items[0]
+    return String(selected?.Descriptor?.digest || selected?.digest || '')
+  }
+
+  if (Array.isArray(payload)) {
+    return preferPlatform(payload)
+  }
+  if (payload?.Descriptor?.digest) return String(payload.Descriptor.digest)
+  if (Array.isArray(payload?.manifests)) {
+    return preferPlatform(payload.manifests)
+  }
+  return ''
+}
+
+async function dockerRemoteDigest(remoteRef) {
+  try {
+    const out = await runDocker(['manifest', 'inspect', '--verbose', remoteRef], { timeoutMs: 30000 })
+    const raw = String(out.stdout || '').trim()
+    if (!raw) return ''
+    const parsed = JSON.parse(raw)
+    return pickDigestFromManifestVerbose(parsed)
+  } catch {
+    return ''
+  }
+}
+
 async function ensureSeedImages(manifest) {
   emitStartupProgress('seed', 0, 'Checking embedded seed images')
   if (!manifest.images.length) {
@@ -568,6 +641,37 @@ async function maybeUpdateImages(manifest) {
   emitStartupProgress('pull', 0, 'Checking updates for Docker images')
   for (let i = 0; i < manifest.images.length; i += 1) {
     const item = manifest.images[i]
+    const localTag = item?.local_tag || 'local image'
+    const remoteRef = item?.remote || ''
+    const expectedId = String(item?.image_id || '').trim()
+    if (localTag && expectedId) {
+      const localId = await dockerImageId(localTag)
+      if (localId && localId === expectedId) {
+        emitStartupProgress(
+          'pull',
+          Math.round(((i + 1) / manifest.images.length) * 100),
+          `Image ${localTag} already matches embedded seed, skip pull`
+        )
+        continue
+      }
+    }
+    if (remoteRef) {
+      const remoteRepo = repoFromImageRef(remoteRef)
+      const remoteDigest = await dockerRemoteDigest(remoteRef)
+      if (remoteDigest) {
+        const localDigestFromRemote = await dockerLocalRepoDigest(remoteRef, remoteRepo)
+        const localDigestFromLocalTag = await dockerLocalRepoDigest(localTag, remoteRepo)
+        const localDigest = localDigestFromRemote || localDigestFromLocalTag
+        if (localDigest && localDigest === remoteDigest) {
+          emitStartupProgress(
+            'pull',
+            Math.round(((i + 1) / manifest.images.length) * 100),
+            `Image ${localTag} already matches remote digest, skip pull`
+          )
+          continue
+        }
+      }
+    }
     emitStartupProgress(
       'pull',
       Math.round((i / manifest.images.length) * 100),
@@ -577,7 +681,6 @@ async function maybeUpdateImages(manifest) {
       await pullAndRetagImage(item, i, manifest.images.length)
     } catch (error) {
       failedPulls += 1
-      const localTag = item?.local_tag || 'local image'
       const errText = (error?.message || '').trim()
       emitStartupProgress(
         'pull',
