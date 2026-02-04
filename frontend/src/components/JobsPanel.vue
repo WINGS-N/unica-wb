@@ -3,6 +3,7 @@ defineProps({
   t: { type: Function, required: true },
   jobsLoading: { type: Boolean, required: true },
   jobs: { type: Array, required: true },
+  jobsMaxHeight: { type: Number, default: null },
   selectedJob: { type: Object, default: null },
   jobTitle: { type: Function, required: true },
   parseJobMods: { type: Function, required: true },
@@ -17,17 +18,17 @@ const emit = defineEmits(['select-job', 'open-stop', 'open-mods', 'load-debloat'
 </script>
 
 <template>
-  <div class="rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-6 lg:col-span-2">
+  <div class="flex min-h-[50vh] flex-col rounded-2xl border border-slate-800 bg-slate-900/70 p-4 sm:p-6 lg:col-span-2" :style="jobsMaxHeight ? { maxHeight: `${jobsMaxHeight}px` } : undefined">
     <h2 class="flex items-center gap-2 text-xl font-semibold">
       <span>{{ t('jobs') }}</span>
       <span v-if="jobsLoading" class="h-4 w-4 animate-spin rounded-full border border-slate-500 border-t-cyan-400" />
     </h2>
-    <div class="mt-3 grid max-h-[50vh] gap-2 overflow-auto pr-1">
+    <div class="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-auto pr-1">
       <div v-if="jobsLoading && !jobs.length" class="rounded-xl border border-slate-700 bg-slate-800/70 p-3 text-sm text-slate-300">{{ t('loading') }}</div>
       <button
         v-for="job in jobs"
         :key="job.id"
-        class="rounded-xl border px-3 py-2 text-left"
+        class="w-full rounded-xl border px-3 py-2 text-left"
         :class="selectedJob?.id === job.id ? 'border-cyan-400 bg-cyan-500/10' : 'border-slate-700 bg-slate-800/70'"
         @click="$emit('select-job', job)"
       >

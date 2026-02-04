@@ -123,6 +123,13 @@ let repoProgressReconnect = null
 let repoProgressShouldReconnect = true
 let repoUrlSaveTimer = null
 let timer = null
+const buildQueueHost = ref(null)
+const jobsPanelMaxHeight = ref(null)
+
+function syncJobsPanelHeight() {
+  const el = buildQueueHost.value
+  jobsPanelMaxHeight.value = el ? Math.max(320, Math.round(el.getBoundingClientRect().height)) : null
+}
 
 function isTerminalStatus(status) {
   return ['succeeded', 'failed', 'reused', 'canceled'].includes(String(status || ''))
@@ -441,6 +448,8 @@ async function fetchDefaults(selectedTarget) {
     targetFirmwareStatus.value = data.target_firmware_status || targetFirmwareStatus.value
   } finally {
     defaultsLoading.value = false
+    await nextTick()
+    syncJobsPanelHeight()
   }
 }
 
@@ -1037,6 +1046,9 @@ onMounted(async () => {
   if (selectedJob.value) {
     selectJob(selectedJob.value)
   }
+  await nextTick()
+  syncJobsPanelHeight()
+  window.addEventListener('resize', syncJobsPanelHeight)
   timer = setInterval(fetchJobs, 5000)
 })
 
@@ -1046,6 +1058,7 @@ onUnmounted(() => {
   closeRepoProgressWs()
   if (repoUrlSaveTimer) clearTimeout(repoUrlSaveTimer)
   if (timer) clearInterval(timer)
+  window.removeEventListener('resize', syncJobsPanelHeight)
 })
 </script>
 
@@ -1079,35 +1092,38 @@ onUnmounted(() => {
       @set-language="setLanguage"
     />
     <div class="mx-auto grid max-w-7xl grid-cols-1 gap-4 lg:grid-cols-3">
-      <BuildQueuePanel
-        :t="t"
-        v-model:target="target"
-        :target-options="targetOptions"
-        :latest-artifact-available="latestArtifactAvailable"
-        v-model:source-firmware="sourceFirmware"
-        v-model:target-firmware="targetFirmware"
-        v-model:version-major="versionMajor"
-        v-model:version-minor="versionMinor"
-        v-model:version-patch="versionPatch"
-        v-model:version-suffix="versionSuffix"
-        v-model:force="force"
-        v-model:no-rom-zip="noRomZip"
-        :loading="loading"
-        :debloat-disabled-count="debloatDisabledIds.length"
-        :uploaded-mods-id="uploadedModsId"
-        :uploaded-mods-count="uploadedMods.length"
-        @target-change="fetchDefaults"
-        @submit="submitJob"
-        @open-upload="openUploadModal"
-        @open-debloat="openDebloatModal"
-        @open-latest="openLatestArtifactForTarget"
-        @clear-uploaded-mods="clearUploadedMods"
-      />
+      <div ref="buildQueueHost">
+        <BuildQueuePanel
+          :t="t"
+          v-model:target="target"
+          :target-options="targetOptions"
+          :latest-artifact-available="latestArtifactAvailable"
+          v-model:source-firmware="sourceFirmware"
+          v-model:target-firmware="targetFirmware"
+          v-model:version-major="versionMajor"
+          v-model:version-minor="versionMinor"
+          v-model:version-patch="versionPatch"
+          v-model:version-suffix="versionSuffix"
+          v-model:force="force"
+          v-model:no-rom-zip="noRomZip"
+          :loading="loading"
+          :debloat-disabled-count="debloatDisabledIds.length"
+          :uploaded-mods-id="uploadedModsId"
+          :uploaded-mods-count="uploadedMods.length"
+          @target-change="fetchDefaults"
+          @submit="submitJob"
+          @open-upload="openUploadModal"
+          @open-debloat="openDebloatModal"
+          @open-latest="openLatestArtifactForTarget"
+          @clear-uploaded-mods="clearUploadedMods"
+        />
+      </div>
 
       <JobsPanel
         :t="t"
         :jobs-loading="jobsLoading"
         :jobs="jobs"
+        :jobs-max-height="jobsPanelMaxHeight"
         :selected-job="selectedJob"
         :job-title="jobTitle"
         :parse-job-mods="parseJobMods"
