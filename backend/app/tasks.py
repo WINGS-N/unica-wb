@@ -20,8 +20,6 @@ from .repo_progress import clear_progress as clear_repo_progress, set_progress a
 from .mods_archive import validate_mods_archive
 from .models import BuildJob
 from .queue import redis_conn
-from rq.exceptions import NoSuchJobError
-from rq.job import Job
 
 
 def _now():
@@ -361,6 +359,8 @@ def _run_operation_job(job_id: str, operation):
         job = db.get(BuildJob, job_id)
         if not job:
             return
+        if job.status == "canceled":
+            return
         Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)
         op_name = _safe_target(job.operation_name or "operation")
         log_file = Path(settings.logs_dir) / f"{op_name}-{job.id}.log"
@@ -689,20 +689,6 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
         if job.status in {"succeeded", "failed", "reused", "canceled"}:
             return
 
-        if job.status == "queued" and job.queue_job_id:
-            try:
-                rq_job = Job.fetch(job.queue_job_id, connection=redis_conn)
-                rq_job.cancel()
-            except NoSuchJobError:
-                pass
-            except Exception:
-                pass
-            job.status = "canceled"
-            job.error = "Build canceled by user (queued job)"
-            job.finished_at = _now()
-            db.commit()
-            return
-
         if job.status == "running" and job.process_pid:
             sig = signal.SIGKILL if signal_type == "sigkill" else signal.SIGTERM
             try:
@@ -753,6 +739,8 @@ def run_build_job(job_id: str):
     try:
         job = db.get(BuildJob, job_id)
         if not job:
+            return
+        if job.status == "canceled":
             return
 
         Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)

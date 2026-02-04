@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import hashlib
 import json
 import re
@@ -6,17 +7,16 @@ import shlex
 import shutil
 import subprocess
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
-from fastapi import Depends, FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from redis.exceptions import RedisError
-from rq.exceptions import NoSuchJobError
-from rq.job import Job
 from sqlalchemy import desc, text
 from sqlalchemy.orm import Session
 
@@ -34,32 +34,28 @@ from .mods_archive import (
     validate_mods_archive,
 )
 from .models import AppSetting, BuildJob
-from .queue import build_queue, control_queue, redis_conn
+from .queue import ARQ_QUEUE_BUILDS, ARQ_QUEUE_CONTROLS, close_arq_pool, get_arq_pool, redis_conn
 from .repo_progress import PROGRESS_CHANNEL as REPO_PROGRESS_CHANNEL
 from .repo_progress import clear_progress as clear_repo_progress
 from .repo_progress import get_progress as get_repo_progress
 from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest
-from .tasks import (
-    run_build_job,
-    run_delete_samsung_fw_job,
-    run_extract_samsung_fw_job,
-    run_repo_clone_job,
-    run_repo_delete_job,
-    run_repo_pull_job,
-    run_repo_submodules_job,
-    run_stop_job_task,
-)
 
 app = FastAPI(title=settings.app_name)
 
 _FIRMWARE_LATEST_TIMEOUT_SEC = 10.0
-_FIRMWARE_LATEST_TTL_SEC = 600.0
+_FIRMWARE_LATEST_TTL_SEC = 3600.0
 _FIRMWARE_LATEST_RETRY_SEC = 60.0
 _FW_CACHE_KEY_PREFIX = "un1ca:cache:fw_latest:"
 _FW_STATS_KEY = "un1ca:cache:fw_latest:stats"
-_DIR_SIZE_TTL_SEC = 120.0
+_DIR_SIZE_TTL_SEC = 1200.0
 _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 _DIR_STATS_KEY = "un1ca:cache:dir_size:stats"
+_REPO_INFO_TTL_SEC = 30.0
+_REPO_INFO_KEY = "un1ca:cache:repo_info:v1"
+_GIT_SNAPSHOT_TTL_SEC = 30.0
+_GIT_SNAPSHOT_KEY = "un1ca:cache:git_snapshot:v1"
+_HTTP_METRICS_PREFIX = "un1ca:metrics:http:"
+_HTTP_LAT_BUCKETS_MS = [10, 25, 50, 100, 200, 350, 500, 750, 1000, 2000, 5000]
 
 
 def _redis_get_json(key: str) -> dict:
@@ -108,6 +104,120 @@ def _redis_count_keys(prefix: str) -> int:
         return sum(1 for _ in redis_conn.scan_iter(match=f"{prefix}*"))
     except Exception:
         return 0
+
+
+def _redis_del(key: str):
+    try:
+        redis_conn.delete(key)
+    except Exception:
+        pass
+
+
+def _invalidate_repo_caches():
+    _redis_del(_REPO_INFO_KEY)
+    _redis_del(_GIT_SNAPSHOT_KEY)
+
+
+async def _enqueue_build(function_name: str, *args) -> str:
+    pool = await get_arq_pool()
+    queue_job_id = str(uuid.uuid4())
+    await pool.enqueue_job(function_name, *args, _job_id=queue_job_id, _queue_name=ARQ_QUEUE_BUILDS)
+    return queue_job_id
+
+
+async def _enqueue_control(function_name: str, *args) -> str:
+    pool = await get_arq_pool()
+    queue_job_id = str(uuid.uuid4())
+    await pool.enqueue_job(function_name, *args, _job_id=queue_job_id, _queue_name=ARQ_QUEUE_CONTROLS)
+    return queue_job_id
+
+
+def _http_metric_key(method: str, route_label: str) -> str:
+    return f"{_HTTP_METRICS_PREFIX}{method}:{route_label}"
+
+
+def _record_http_metric(method: str, route_label: str, status_code: int, latency_ms: float):
+    key = _http_metric_key(method, route_label)
+    ms = max(0, int(round(latency_ms)))
+    bucket_field = "b_inf"
+    for bound in _HTTP_LAT_BUCKETS_MS:
+        if ms <= bound:
+            bucket_field = f"b_{bound}"
+            break
+    try:
+        pipe = redis_conn.pipeline()
+        pipe.hincrby(key, "count", 1)
+        pipe.hincrby(key, "sum_ms", ms)
+        pipe.hincrby(key, bucket_field, 1)
+        if status_code >= 500:
+            pipe.hincrby(key, "err_5xx", 1)
+        pipe.hset(key, "last_status", int(status_code))
+        pipe.hset(key, "last_ms", ms)
+        pipe.execute()
+        redis_conn.expire(key, 7 * 24 * 3600)
+    except Exception:
+        pass
+
+
+def _hist_percentile(fields: dict[str, int], q: float) -> int:
+    total = int(fields.get("count", 0))
+    if total <= 0:
+        return 0
+    need = max(1, int(total * q))
+    seen = 0
+    for bound in _HTTP_LAT_BUCKETS_MS:
+        seen += int(fields.get(f"b_{bound}", 0))
+        if seen >= need:
+            return bound
+    return _HTTP_LAT_BUCKETS_MS[-1]
+
+
+def _collect_http_metrics() -> dict[str, dict[str, int | float]]:
+    out: dict[str, dict[str, int | float]] = {}
+    try:
+        keys = list(redis_conn.scan_iter(match=f"{_HTTP_METRICS_PREFIX}*"))
+    except Exception:
+        return out
+    for key in keys:
+        raw_key = key.decode("utf-8") if isinstance(key, bytes) else str(key)
+        name = raw_key.removeprefix(_HTTP_METRICS_PREFIX)
+        try:
+            raw = redis_conn.hgetall(raw_key)
+        except Exception:
+            continue
+        fields: dict[str, int] = {}
+        for k, v in raw.items():
+            kk = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+            vv = v.decode("utf-8") if isinstance(v, bytes) else str(v)
+            try:
+                fields[kk] = int(vv)
+            except Exception:
+                fields[kk] = 0
+        count = int(fields.get("count", 0))
+        sum_ms = int(fields.get("sum_ms", 0))
+        avg_ms = round(sum_ms / count, 2) if count else 0.0
+        out[name] = {
+            "count": count,
+            "avg_ms": avg_ms,
+            "p50_ms": _hist_percentile(fields, 0.50),
+            "p95_ms": _hist_percentile(fields, 0.95),
+            "last_ms": int(fields.get("last_ms", 0)),
+            "last_status": int(fields.get("last_status", 0)),
+            "err_5xx": int(fields.get("err_5xx", 0)),
+        }
+    return out
+
+
+def _http_metrics_top(limit: int = 10, sort_by: str = "p95") -> list[dict[str, int | float | str]]:
+    metrics = _collect_http_metrics()
+    key_name = "p95_ms" if sort_by == "p95" else "avg_ms"
+    items: list[dict[str, int | float | str]] = []
+    for endpoint, values in metrics.items():
+        row = {"endpoint": endpoint}
+        row.update(values)
+        items.append(row)
+    items.sort(key=lambda x: float(x.get(key_name, 0.0)), reverse=True)
+    return items[: max(1, min(limit, 100))]
 
 
 def _resolve_un1ca_root_path() -> Path | None:
@@ -302,12 +412,39 @@ def _collect_samsung_fw() -> dict[str, list[dict[str, str | int | bool]]]:
     return {"items": sorted(rows.values(), key=lambda x: str(x.get("key", "")))}
 
 
+def _fill_latest_for_fw_items(items: list[dict[str, str | int | bool]]):
+    # Resolve latest firmware in parallel to avoid N sequential network waits on first load.
+    pairs: list[tuple[str, str]] = []
+    for item in items:
+        model = str(item.get("model") or "")
+        csc = str(item.get("csc") or "")
+        if model and csc:
+            pairs.append((model, csc))
+    uniq = sorted(set(pairs))
+    if not uniq:
+        return
+    latest_map: dict[tuple[str, str], str] = {}
+    max_workers = min(8, max(2, len(uniq)))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        fut_map = {pool.submit(_get_latest_firmware, model, csc): (model, csc) for model, csc in uniq}
+        for fut in concurrent.futures.as_completed(fut_map):
+            model, csc = fut_map[fut]
+            try:
+                latest_map[(model, csc)] = fut.result()
+            except Exception:
+                latest_map[(model, csc)] = ""
+    for item in items:
+        model = str(item.get("model") or "")
+        csc = str(item.get("csc") or "")
+        item["latest_version"] = latest_map.get((model, csc), "")
+
+
 def _make_firmware_status(firmware_value: str, cache_items: list[dict[str, str | int | bool]]) -> dict[str, str | bool]:
     # Формируем status для верхних карточек source/target с флагом up_to_date.
     model, csc = _parse_model_csc(firmware_value)
-    latest = _get_latest_firmware(model, csc)
     key = f"{model}_{csc}" if model and csc else ""
     entry = next((x for x in cache_items if x.get("key") == key), None)
+    latest = str(entry.get("latest_version") or "") if entry else _get_latest_firmware(model, csc)
     downloaded = str(entry.get("odin_version")) if entry and entry.get("odin_version") else ""
     extracted = str(entry.get("fw_version")) if entry and entry.get("fw_version") else ""
     return {
@@ -542,28 +679,55 @@ def _repo_sync_status(root: Path, branch: str) -> dict[str, str | int]:
         return {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": remote_ref}
 
 
+def _git_snapshot_cached() -> dict[str, dict]:
+    cached = _redis_get_json(_GIT_SNAPSHOT_KEY)
+    if cached and isinstance(cached.get("commit"), dict) and isinstance(cached.get("repo_sync"), dict):
+        return cached
+    if not _repo_exists():
+        payload = {
+            "commit": {
+                "branch": "",
+                "short_hash": settings.source_commit or "unknown",
+                "full_hash": "",
+                "subject": "",
+                "body": "",
+                "author_name": "",
+                "author_email": "",
+                "committer_name": "",
+                "committer_email": "",
+            },
+            "repo_sync": {
+                "state": "unknown",
+                "ahead_by": 0,
+                "behind_by": 0,
+                "remote_ref": "",
+            },
+        }
+    else:
+        repo_root = _repo_root()
+        commit_details = _resolve_commit_details()
+        repo_sync = _repo_sync_status(repo_root, str(commit_details.get("branch") or ""))
+        payload = {"commit": commit_details, "repo_sync": repo_sync}
+    _redis_set_json(_GIT_SNAPSHOT_KEY, payload)
+    try:
+        redis_conn.expire(_GIT_SNAPSHOT_KEY, int(_GIT_SNAPSHOT_TTL_SEC))
+    except Exception:
+        pass
+    return payload
+
+
 def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
+    cached = _redis_get_json(_REPO_INFO_KEY)
+    if cached and isinstance(cached.get("git_url"), str):
+        return cached
+
     repo_root = _repo_root()
     git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
-    commit_details = _resolve_commit_details() if _repo_exists() else {
-        "branch": "",
-        "short_hash": settings.source_commit or "unknown",
-        "full_hash": "",
-        "subject": "",
-        "body": "",
-        "author_name": "",
-        "author_email": "",
-        "committer_name": "",
-        "committer_email": "",
-    }
-    repo_sync = _repo_sync_status(repo_root, str(commit_details.get("branch") or "")) if _repo_exists() else {
-        "state": "unknown",
-        "ahead_by": 0,
-        "behind_by": 0,
-        "remote_ref": "",
-    }
-    return {
+    snapshot = _git_snapshot_cached()
+    commit_details = snapshot.get("commit", {})
+    repo_sync = snapshot.get("repo_sync", {})
+    payload = {
         "git_url": git_url,
         "git_ref": git_ref,
         "repo_path": str(repo_root),
@@ -573,6 +737,20 @@ def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
         "repo_sync": repo_sync,
         "progress": get_repo_progress(),
     }
+    _redis_set_json(_REPO_INFO_KEY, payload)
+    try:
+        redis_conn.expire(_REPO_INFO_KEY, int(_REPO_INFO_TTL_SEC))
+    except Exception:
+        pass
+    return payload
+
+
+def _repo_info_with_new_session() -> dict[str, str | int | bool | dict]:
+    db = SessionLocal()
+    try:
+        return _repo_info(db)
+    finally:
+        db.close()
 
 
 def _run_repo_pull() -> dict[str, str | int]:
@@ -619,19 +797,26 @@ def _normalize_path_list(values: list[str] | None) -> list[str]:
 
 
 @app.on_event("startup")
-def on_startup():
+async def on_startup():
     Path(settings.data_dir).mkdir(parents=True, exist_ok=True)
     Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     run_migrations()
-    cleaned = cleanup_stale_build_overrides()
+    cleaned = await asyncio.to_thread(cleanup_stale_build_overrides)
     clear_progress()
     clear_repo_progress()
+    _invalidate_repo_caches()
+    await get_arq_pool()
     print(
         f"[startup] cleanup: removed {cleaned['uploaded_mod_dirs']} uploaded mod override dirs, "
         f"{cleaned['tmp_extra_mods_dirs']} temp extra-mod dirs",
         flush=True,
     )
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await close_arq_pool()
 
 
 app.add_middleware(
@@ -641,6 +826,20 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def http_perf_metrics_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    status_code = 500
+    try:
+        response = await call_next(request)
+        status_code = int(getattr(response, "status_code", 200))
+        return response
+    finally:
+        route = request.scope.get("route")
+        route_label = getattr(route, "path", None) or request.url.path
+        _record_http_metric(request.method, str(route_label), status_code, (time.perf_counter() - started) * 1000.0)
 
 
 def _target_has_latest_artifact(db: Session, target: str) -> bool:
@@ -662,29 +861,113 @@ def _target_has_latest_artifact(db: Session, target: str) -> bool:
     return Path(job.artifact_path).exists()
 
 
-@app.get(f"{settings.api_prefix}/healthz")
-def healthz():
+def _target_has_latest_artifact_with_new_session(target: str) -> bool:
+    db = SessionLocal()
     try:
+        return _target_has_latest_artifact(db, target)
+    finally:
+        db.close()
+
+
+def _list_jobs_with_new_session(limit: int) -> list[BuildJob]:
+    db = SessionLocal()
+    try:
+        return db.query(BuildJob).order_by(desc(BuildJob.created_at)).limit(min(max(limit, 1), 200)).all()
+    finally:
+        db.close()
+
+
+def _get_job_with_new_session(job_id: str) -> BuildJob | None:
+    db = SessionLocal()
+    try:
+        return db.get(BuildJob, job_id)
+    finally:
+        db.close()
+
+
+def _get_job_artifact_path_with_new_session(job_id: str) -> Path:
+    db = SessionLocal()
+    try:
+        job = db.get(BuildJob, job_id)
+        if not job or not job.artifact_path:
+            raise HTTPException(404, "Artifact not found")
+        p = Path(job.artifact_path)
+        if not p.exists():
+            raise HTTPException(404, "Artifact file is missing")
+        return p
+    finally:
+        db.close()
+
+
+def _get_latest_artifact_path_for_target_with_new_session(target: str) -> Path:
+    db = SessionLocal()
+    try:
+        if target not in _get_targets():
+            raise HTTPException(400, "Unknown target")
+        job = (
+            db.query(BuildJob)
+            .filter(
+                BuildJob.target == target,
+                BuildJob.status.in_(("succeeded", "reused")),
+                BuildJob.artifact_path.isnot(None),
+            )
+            .order_by(desc(BuildJob.finished_at), desc(BuildJob.created_at))
+            .first()
+        )
+        if not job or not job.artifact_path:
+            raise HTTPException(404, "Latest artifact not found for target")
+        p = Path(job.artifact_path)
+        if not p.exists():
+            raise HTTPException(404, "Artifact file is missing")
+        return p
+    finally:
+        db.close()
+
+
+def _update_repo_config_with_new_session(git_url: str) -> dict[str, str | int | bool | dict]:
+    db = SessionLocal()
+    try:
+        _set_setting(db, "repo.git_url", git_url)
+        _invalidate_repo_caches()
+        return _repo_info(db)
+    finally:
+        db.close()
+
+
+def _readyz_impl() -> dict:
+    db = SessionLocal()
+    try:
+        db.execute(text("SELECT 1"))
         redis_conn.ping()
+    finally:
+        db.close()
+    return {"status": "ready"}
+
+
+@app.get(f"{settings.api_prefix}/healthz")
+async def healthz():
+    try:
+        await asyncio.to_thread(redis_conn.ping)
     except RedisError as exc:
         return JSONResponse(status_code=503, content={"status": "down", "redis": str(exc)})
     return {"status": "ok"}
 
 
 @app.get(f"{settings.api_prefix}/readyz")
-def readyz(db: Session = Depends(get_db)):
+async def readyz():
     try:
-        db.execute(text("SELECT 1"))
-        redis_conn.ping()
+        return await asyncio.to_thread(_readyz_impl)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=503, content={"status": "down", "reason": str(exc)})
-    return {"status": "ready"}
 
 
 @app.get(f"{settings.api_prefix}/debug/perf")
-def debug_perf():
-    fw_stats = _redis_hgetall_int(_FW_STATS_KEY)
-    dir_stats = _redis_hgetall_int(_DIR_STATS_KEY)
+async def debug_perf():
+    fw_stats, dir_stats, http_metrics = await asyncio.gather(
+        asyncio.to_thread(_redis_hgetall_int, _FW_STATS_KEY),
+        asyncio.to_thread(_redis_hgetall_int, _DIR_STATS_KEY),
+        asyncio.to_thread(_collect_http_metrics),
+    )
     return {
         "firmware_latest_cache": {
             "storage": "redis",
@@ -705,11 +988,30 @@ def debug_perf():
             "hits": dir_stats.get("hits", 0),
             "misses": dir_stats.get("misses", 0),
         },
+        "repo_cache": {
+            "storage": "redis",
+            "repo_info_ttl_sec": _REPO_INFO_TTL_SEC,
+            "git_snapshot_ttl_sec": _GIT_SNAPSHOT_TTL_SEC,
+            "repo_info_cached": bool(_redis_get_json(_REPO_INFO_KEY)),
+            "git_snapshot_cached": bool(_redis_get_json(_GIT_SNAPSHOT_KEY)),
+        },
+        "http_metrics": {
+            "storage": "redis",
+            "endpoints": http_metrics,
+        },
     }
 
 
+@app.get(f"{settings.api_prefix}/debug/perf/top")
+async def debug_perf_top(limit: int = 10, sort_by: str = "p95"):
+    if sort_by not in {"p95", "avg"}:
+        raise HTTPException(400, "sort_by must be p95 or avg")
+    top = await asyncio.to_thread(_http_metrics_top, limit, sort_by)
+    return {"sort_by": sort_by, "limit": max(1, min(limit, 100)), "items": top}
+
+
 @app.post(f"{settings.api_prefix}/jobs", response_model=BuildJobRead)
-def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
+async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
     # Главный endpoint постановки build job: defaults -> signature -> reuse или новая очередь.
     source_commit = _resolve_source_commit()
     if payload.target not in _get_targets():
@@ -839,28 +1141,30 @@ def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(job)
 
-    q_job = build_queue.enqueue(run_build_job, job.id, job_timeout="12h", result_ttl=86400)
-    job.queue_job_id = q_job.id
+    job.queue_job_id = await _enqueue_build("build_job_task", job.id)
     db.commit()
     db.refresh(job)
     return job
 
 
 @app.get(f"{settings.api_prefix}/defaults")
-def get_defaults(target: str | None = None, db: Session = Depends(get_db)):
+async def get_defaults(target: str | None = None):
     # Этот endpoint кормит почти весь UI: target list, defaults, commit info, firmware statuses.
-    targets = _get_targets()
-    target_options = _get_target_options()
+    target_options = await asyncio.to_thread(_get_target_options)
+    targets = [str(x.get("code") or "") for x in target_options if x.get("code")]
     selected_target = target
     if not selected_target:
         selected_target = "b0s" if "b0s" in targets else (targets[0] if targets else "")
-    defaults = _get_defaults_for_target(selected_target) if selected_target else {}
-    fw_info = _collect_samsung_fw()
+    defaults = await asyncio.to_thread(_get_defaults_for_target, selected_target) if selected_target else {}
+    fw_info = await asyncio.to_thread(_collect_samsung_fw)
+    await asyncio.to_thread(_fill_latest_for_fw_items, fw_info["items"])
     source_firmware = str(defaults.get("source_firmware", ""))
     target_firmware = str(defaults.get("target_firmware", ""))
-    source_status = _make_firmware_status(source_firmware, fw_info["items"])
-    target_status = _make_firmware_status(target_firmware, fw_info["items"])
-    repo_info = _repo_info(db)
+    source_status, target_status = await asyncio.gather(
+        asyncio.to_thread(_make_firmware_status, source_firmware, fw_info["items"]),
+        asyncio.to_thread(_make_firmware_status, target_firmware, fw_info["items"]),
+    )
+    repo_info = await asyncio.to_thread(_repo_info_with_new_session)
     commit_details = repo_info.get("commit") if isinstance(repo_info.get("commit"), dict) else {}
     repo_sync = repo_info.get("repo_sync") if isinstance(repo_info.get("repo_sync"), dict) else {}
     root = _resolve_un1ca_root_path()
@@ -869,10 +1173,10 @@ def get_defaults(target: str | None = None, db: Session = Depends(get_db)):
         "target_options": target_options,
         "target": selected_target,
         "defaults": defaults,
-        "current_commit": commit_details.get("short_hash") or _resolve_source_commit(),
-        "current_commit_subject": commit_details.get("subject") or _resolve_source_commit_subject(),
+        "current_commit": commit_details.get("short_hash") or (settings.source_commit or "unknown"),
+        "current_commit_subject": commit_details.get("subject") or "",
         "current_commit_details": commit_details,
-        "latest_artifact_available": _target_has_latest_artifact(db, selected_target),
+        "latest_artifact_available": await asyncio.to_thread(_target_has_latest_artifact_with_new_session, selected_target),
         "repo_sync": repo_sync,
         "repo_info": repo_info,
         "firmware_status": source_status,
@@ -882,60 +1186,59 @@ def get_defaults(target: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.get(f"{settings.api_prefix}/repo/info")
-def repo_info(db: Session = Depends(get_db)):
-    return _repo_info(db)
+async def repo_info():
+    return await asyncio.to_thread(_repo_info_with_new_session)
 
 
 @app.patch(f"{settings.api_prefix}/repo/config")
-def update_repo_config(payload: RepoConfigUpdate, db: Session = Depends(get_db)):
+async def update_repo_config(payload: RepoConfigUpdate):
     value = (payload.git_url or "").strip()
     if not re.match(r"^(https://|git@|ssh://).+", value):
         raise HTTPException(400, "Invalid git url")
-    _set_setting(db, "repo.git_url", value)
-    return _repo_info(db)
+    return await asyncio.to_thread(_update_repo_config_with_new_session, value)
 
 
 @app.post(f"{settings.api_prefix}/repo/clone", response_model=BuildJobRead)
-def repo_clone(db: Session = Depends(get_db)):
+async def repo_clone(db: Session = Depends(get_db)):
     git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
     op_job = _create_operation_job(db, target="repo", operation_name=f"Repo clone: {git_url}")
-    q_job = build_queue.enqueue(run_repo_clone_job, op_job.id, git_url, git_ref, job_timeout="6h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    _invalidate_repo_caches()
+    op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, git_url, git_ref)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.post(f"{settings.api_prefix}/repo/pull", response_model=BuildJobRead)
-def repo_pull(db: Session = Depends(get_db)):
+async def repo_pull(db: Session = Depends(get_db)):
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
     op_job = _create_operation_job(db, target="repo", operation_name=f"Repo pull: {git_ref}")
-    q_job = build_queue.enqueue(run_repo_pull_job, op_job.id, git_ref, job_timeout="4h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    _invalidate_repo_caches()
+    op_job.queue_job_id = await _enqueue_build("repo_pull_job_task", op_job.id, git_ref)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.post(f"{settings.api_prefix}/repo/submodules", response_model=BuildJobRead)
-def repo_submodules(db: Session = Depends(get_db)):
+async def repo_submodules(db: Session = Depends(get_db)):
     op_job = _create_operation_job(db, target="repo", operation_name="Repo submodules update")
-    q_job = build_queue.enqueue(run_repo_submodules_job, op_job.id, job_timeout="4h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    _invalidate_repo_caches()
+    op_job.queue_job_id = await _enqueue_build("repo_submodules_job_task", op_job.id)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.delete(f"{settings.api_prefix}/repo", response_model=BuildJobRead)
-def repo_delete(mode: str = "repo_only", db: Session = Depends(get_db)):
+async def repo_delete(mode: str = "repo_only", db: Session = Depends(get_db)):
     if mode not in {"repo_only", "repo_with_out"}:
         raise HTTPException(400, "mode must be repo_only or repo_with_out")
     op_name = "Repo delete (keep out)" if mode == "repo_only" else "Repo delete (with out)"
     op_job = _create_operation_job(db, target="repo", operation_name=op_name)
-    q_job = build_queue.enqueue(run_repo_delete_job, op_job.id, mode, job_timeout="1h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    _invalidate_repo_caches()
+    op_job.queue_job_id = await _enqueue_build("repo_delete_job_task", op_job.id, mode)
     db.commit()
     db.refresh(op_job)
     return op_job
@@ -946,10 +1249,11 @@ async def stream_repo_progress_ws(websocket: WebSocket):
     await websocket.accept()
     pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
     try:
-        await websocket.send_json({"type": "snapshot", "item": get_repo_progress()})
-        pubsub.subscribe(REPO_PROGRESS_CHANNEL)
+        snapshot = await asyncio.to_thread(get_repo_progress)
+        await websocket.send_json({"type": "snapshot", "item": snapshot})
+        await asyncio.to_thread(pubsub.subscribe, REPO_PROGRESS_CHANNEL)
         while True:
-            message = pubsub.get_message(timeout=1.0)
+            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
             if message and message.get("type") == "message":
                 data = message.get("data")
                 try:
@@ -962,27 +1266,26 @@ async def stream_repo_progress_ws(websocket: WebSocket):
         pass
     finally:
         try:
-            pubsub.close()
+            await asyncio.to_thread(pubsub.close)
         except Exception:
             pass
 
 
 @app.get(f"{settings.api_prefix}/debloat/options")
-def get_debloat_options():
+async def get_debloat_options():
     root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    entries = parse_unica_debloat_entries(root)
+    entries = await asyncio.to_thread(parse_unica_debloat_entries, root)
     return {"entries": entries}
 
 
 @app.get(f"{settings.api_prefix}/firmware/samsung")
-def get_samsung_fw():
+async def get_samsung_fw():
     # Данные для модалки Samsung FW: кэш, размеры, latest version, update_available.
-    items = _collect_samsung_fw()["items"]
+    items = (await asyncio.to_thread(_collect_samsung_fw))["items"]
+    await asyncio.to_thread(_fill_latest_for_fw_items, items)
     progress = list_progress()
     for item in items:
-        model = str(item.get("model") or "")
-        csc = str(item.get("csc") or "")
-        latest = _get_latest_firmware(model, csc)
+        latest = str(item.get("latest_version") or "")
         item["latest_version"] = latest
         downloaded = str(item.get("odin_version") or "")
         extracted = str(item.get("fw_version") or "")
@@ -996,10 +1299,11 @@ async def stream_firmware_progress_ws(websocket: WebSocket):
     await websocket.accept()
     pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
     try:
-        await websocket.send_json({"type": "snapshot", "items": list(list_progress().values())})
-        pubsub.subscribe(PROGRESS_CHANNEL)
+        progress = await asyncio.to_thread(list_progress)
+        await websocket.send_json({"type": "snapshot", "items": list(progress.values())})
+        await asyncio.to_thread(pubsub.subscribe, PROGRESS_CHANNEL)
         while True:
-            message = pubsub.get_message(timeout=1.0)
+            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
             if message and message.get("type") == "message":
                 data = message.get("data")
                 try:
@@ -1012,13 +1316,13 @@ async def stream_firmware_progress_ws(websocket: WebSocket):
         pass
     finally:
         try:
-            pubsub.close()
+            await asyncio.to_thread(pubsub.close)
         except Exception:
             pass
 
 
 @app.delete(f"{settings.api_prefix}/firmware/samsung/{{fw_type}}/{{fw_key}}", response_model=BuildJobRead)
-def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
+async def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
     # Удаление делает operation-job через очередь, чтобы action был логируемый и отменяемый.
     if fw_type not in {"odin", "fw"}:
         raise HTTPException(400, "fw_type must be 'odin' or 'fw'")
@@ -1044,15 +1348,14 @@ def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None = None
         target=selected_target,
         operation_name=f"Delete {fw_type.upper()} FW entry: {fw_key}",
     )
-    q_job = build_queue.enqueue(run_delete_samsung_fw_job, op_job.id, fw_type, fw_key, job_timeout="2h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    op_job.queue_job_id = await _enqueue_build("delete_fw_job_task", op_job.id, fw_type, fw_key)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.post(f"{settings.api_prefix}/firmware/samsung/{{fw_key}}/extract", response_model=BuildJobRead)
-def extract_samsung_fw(fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
+async def extract_samsung_fw(fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
     # Extract тоже идет через очередь: heavy I/O, long runtime, нужны логи и статус.
     if not re.fullmatch(r"[A-Za-z0-9._-]+", fw_key):
         raise HTTPException(400, "Invalid fw key")
@@ -1073,8 +1376,7 @@ def extract_samsung_fw(fw_key: str, target: str | None = None, db: Session = Dep
         target=selected_target,
         operation_name=f"Extract FW (-f): {fw_key}",
     )
-    q_job = build_queue.enqueue(run_extract_samsung_fw_job, op_job.id, fw_key, selected_target, job_timeout="4h", result_ttl=3600)
-    op_job.queue_job_id = q_job.id
+    op_job.queue_job_id = await _enqueue_build("extract_fw_job_task", op_job.id, fw_key, selected_target)
     db.commit()
     db.refresh(op_job)
     return op_job
@@ -1113,60 +1415,33 @@ async def upload_mods_archive(file: UploadFile = File(...)):
 
 
 @app.get(f"{settings.api_prefix}/jobs", response_model=list[BuildJobRead])
-def list_jobs(limit: int = 50, db: Session = Depends(get_db)):
-    items = db.query(BuildJob).order_by(desc(BuildJob.created_at)).limit(min(max(limit, 1), 200)).all()
-    return items
+async def list_jobs(limit: int = 50):
+    return await asyncio.to_thread(_list_jobs_with_new_session, limit)
 
 
 @app.get(f"{settings.api_prefix}/jobs/{{job_id}}", response_model=BuildJobRead)
-def get_job(job_id: str, db: Session = Depends(get_db)):
-    job = db.get(BuildJob, job_id)
+async def get_job(job_id: str):
+    job = await asyncio.to_thread(_get_job_with_new_session, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
     return job
 
 
 @app.get(f"{settings.api_prefix}/jobs/{{job_id}}/artifact")
-def download_artifact(job_id: str, db: Session = Depends(get_db)):
-    job = db.get(BuildJob, job_id)
-    if not job or not job.artifact_path:
-        raise HTTPException(404, "Artifact not found")
-
-    p = Path(job.artifact_path)
-    if not p.exists():
-        raise HTTPException(404, "Artifact file is missing")
-
+async def download_artifact(job_id: str):
+    p = await asyncio.to_thread(_get_job_artifact_path_with_new_session, job_id)
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
 
 
 @app.get(f"{settings.api_prefix}/artifacts/latest/{{target}}")
-def download_latest_artifact_for_target(target: str, db: Session = Depends(get_db)):
+async def download_latest_artifact_for_target(target: str):
     # Берем последний успешный/reused artifact по target для кнопки Latest ZIP.
-    if target not in _get_targets():
-        raise HTTPException(400, "Unknown target")
-
-    job = (
-        db.query(BuildJob)
-        .filter(
-            BuildJob.target == target,
-            BuildJob.status.in_(("succeeded", "reused")),
-            BuildJob.artifact_path.isnot(None),
-        )
-        .order_by(desc(BuildJob.finished_at), desc(BuildJob.created_at))
-        .first()
-    )
-    if not job or not job.artifact_path:
-        raise HTTPException(404, "Latest artifact not found for target")
-
-    p = Path(job.artifact_path)
-    if not p.exists():
-        raise HTTPException(404, "Artifact file is missing")
-
+    p = await asyncio.to_thread(_get_latest_artifact_path_for_target_with_new_session, target)
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
 
 
 @app.post(f"{settings.api_prefix}/jobs/{{job_id}}/stop", response_model=BuildJobRead)
-def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = Depends(get_db)):
+async def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = Depends(get_db)):
     # Stop running job идет в control queue, потому что signal должен отправлять worker (same PID namespace).
     job = db.get(BuildJob, job_id)
     if not job:
@@ -1178,14 +1453,6 @@ def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = D
     signal_type = payload.signal_type if payload else "sigterm"
 
     if job.status == "queued":
-        if job.queue_job_id:
-            try:
-                rq_job = Job.fetch(job.queue_job_id, connection=redis_conn)
-                rq_job.cancel()
-            except NoSuchJobError:
-                pass
-            except Exception:
-                pass
         job.status = "canceled"
         job.error = "Build canceled by user (queued job)"
         job.finished_at = datetime.now(timezone.utc)
@@ -1194,59 +1461,83 @@ def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = D
         return job
 
     # Running jobs are stopped from worker-side control queue to avoid PID namespace issues in API container.
-    control_queue.enqueue(run_stop_job_task, job.id, signal_type, job_timeout="10m", result_ttl=600)
+    await _enqueue_control("stop_job_task", job.id, signal_type)
     job.error = f"Stop requested by user ({signal_type.upper()})"
     db.commit()
     db.refresh(job)
     return job
 
 
-@app.websocket(f"{settings.api_prefix}/jobs/{{job_id}}/ws")
-async def stream_logs_ws(websocket: WebSocket, job_id: str, tail_kb: int = 256):
-    await websocket.accept()
+def _get_job_log_snapshot(job_id: str) -> dict[str, str]:
     db = SessionLocal()
     try:
         job = db.get(BuildJob, job_id)
         if not job:
+            return {"exists": "0", "status": "", "log_path": ""}
+        return {
+            "exists": "1",
+            "status": str(job.status or ""),
+            "log_path": str(job.log_path or ""),
+        }
+    finally:
+        db.close()
+
+
+def _read_log_chunk(path: Path, pos: int) -> tuple[str, int]:
+    if not path.exists():
+        return "", pos
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        f.seek(pos)
+        chunk = f.read()
+        return chunk, f.tell()
+
+
+def _tail_log_start_pos(path: Path, tail_kb: int) -> int:
+    if not path.exists() or tail_kb <= 0:
+        return 0
+    size = path.stat().st_size
+    pos = max(0, size - (tail_kb * 1024))
+    if pos <= 0:
+        return 0
+    with path.open("r", encoding="utf-8", errors="ignore") as f:
+        f.seek(pos)
+        _ = f.readline()
+        return f.tell()
+
+
+@app.websocket(f"{settings.api_prefix}/jobs/{{job_id}}/ws")
+async def stream_logs_ws(websocket: WebSocket, job_id: str, tail_kb: int = 256):
+    await websocket.accept()
+    try:
+        snap = await asyncio.to_thread(_get_job_log_snapshot, job_id)
+        if snap.get("exists") != "1":
             await websocket.send_json({"type": "error", "message": "Job not found"})
             await websocket.close(code=1008)
             return
 
-        if not job.log_path:
+        if not snap.get("log_path"):
             await websocket.send_json({"type": "error", "message": "Log file not available yet"})
             await websocket.close(code=1008)
             return
 
-        log_path = Path(job.log_path)
-        pos = 0
+        log_path = Path(str(snap.get("log_path") or ""))
         tail_kb = max(0, min(tail_kb, 4096))
-        if log_path.exists() and tail_kb > 0:
-            size = log_path.stat().st_size
-            pos = max(0, size - (tail_kb * 1024))
-            if pos > 0:
-                with log_path.open("r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(pos)
-                    _ = f.readline()
-                    pos = f.tell()
+        pos = await asyncio.to_thread(_tail_log_start_pos, log_path, tail_kb)
         while True:
-            current = db.get(BuildJob, job_id)
-            if log_path.exists():
-                with log_path.open("r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(pos)
-                    chunk = f.read()
-                    pos = f.tell()
-                    if chunk:
-                        await websocket.send_json({"type": "chunk", "chunk": chunk})
+            chunk, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
+            if chunk:
+                await websocket.send_json({"type": "chunk", "chunk": chunk})
 
-            if current and current.status in {"succeeded", "failed", "canceled"}:
-                await websocket.send_json({"type": "done", "status": current.status})
+            current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
+            status = str(current.get("status") or "")
+
+            if status in {"succeeded", "failed", "canceled"}:
+                await websocket.send_json({"type": "done", "status": status})
                 break
 
             await asyncio.sleep(1)
     except WebSocketDisconnect:
         pass
-    finally:
-        db.close()
 
 
 @app.get(f"{settings.api_prefix}/jobs/{{job_id}}/logs")
@@ -1263,17 +1554,14 @@ async def stream_logs(job_id: str, db: Session = Depends(get_db)):
     async def event_generator():
         pos = 0
         while True:
-            current = db.get(BuildJob, job_id)
-            if log_path.exists():
-                with log_path.open("r", encoding="utf-8", errors="ignore") as f:
-                    f.seek(pos)
-                    chunk = f.read()
-                    pos = f.tell()
-                    if chunk:
-                        for line in chunk.splitlines():
-                            yield f"data: {line}\n\n"
+            chunk, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
+            if chunk:
+                for line in chunk.splitlines():
+                    yield f"data: {line}\n\n"
 
-            if current and current.status in {"succeeded", "failed", "canceled"}:
+            current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
+            status = str(current.get("status") or "")
+            if status in {"succeeded", "failed", "canceled"}:
                 yield "event: done\ndata: build_finished\n\n"
                 break
 

@@ -3,7 +3,7 @@ FROM python:3.13-slim AS runtime-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/srv/app \
+    PYTHONPATH=/app \
     GIT_AUTHOR_NAME="UN1CA Builder" \
     GIT_AUTHOR_EMAIL=builder@local \
     GIT_COMMITTER_NAME="UN1CA Builder" \
@@ -22,22 +22,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN git config --global user.name "UN1CA Builder" && \
     git config --global user.email "builder@local"
 
-WORKDIR /srv/app
-COPY backend/requirements.txt /srv/app/requirements.txt
+WORKDIR /app
+COPY backend/requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r /srv/app/requirements.txt
+    pip install -r /app/requirements.txt
 
 FROM runtime-base AS app-layer
-COPY backend/app /srv/app/app
-COPY backend/worker.py /srv/app/worker.py
-COPY backend/scripts /srv/app/scripts
+COPY backend/app /app/app
+COPY backend/scripts /app/scripts
 RUN mkdir -p /data/logs /workspace
 
 FROM app-layer AS api
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS http://127.0.0.1:8000/api/v1/healthz || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/srv/app/scripts/start-api.sh"]
+CMD ["/app/scripts/start-api.sh"]
 
 FROM runtime-base AS worker-base
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -82,7 +81,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/lib/apt/lists/*
 
 FROM worker-base AS worker
-COPY --from=app-layer /srv/app /srv/app
-WORKDIR /srv/app
+COPY --from=app-layer /app /app
+WORKDIR /app
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["/srv/app/scripts/start-worker.sh"]
+CMD ["/app/scripts/start-worker.sh"]
