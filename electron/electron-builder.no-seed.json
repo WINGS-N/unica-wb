@@ -1,5 +1,10 @@
 {
-  "extends": "./package.json",
+  "appId": "wings.unica.wb",
+  "productName": "UN1CA Web Builder",
+  "files": [
+    "src/**/*",
+    "package.json"
+  ],
   "extraResources": [
     {
       "from": "../docker-compose.yml",
@@ -11,6 +16,12 @@
     }
   ],
   "linux": {
+    "target": [
+      "AppImage",
+      "deb"
+    ],
+    "maintainer": "WINGS-N <wings-n@users.noreply.github.com>",
+    "category": "Development",
     "artifactName": "unica-wb-${version}-no-seed.${ext}"
   }
 }
