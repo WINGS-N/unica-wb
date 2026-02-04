@@ -3,6 +3,10 @@ defineProps({
   t: { type: Function, required: true },
   jobsLoading: { type: Boolean, required: true },
   jobs: { type: Array, required: true },
+  targetOptions: { type: Array, default: () => [] },
+  filterBuildOnly: { type: Boolean, required: true },
+  filterSucceededOnly: { type: Boolean, required: true },
+  filterDevice: { type: String, default: '' },
   jobsMaxHeight: { type: Number, default: null },
   selectedJob: { type: Object, default: null },
   jobTitle: { type: Function, required: true },
@@ -14,7 +18,15 @@ defineProps({
   jobArtifactUrl: { type: Function, required: true }
 })
 
-const emit = defineEmits(['select-job', 'open-stop', 'open-mods', 'load-debloat'])
+const emit = defineEmits([
+  'select-job',
+  'open-stop',
+  'open-mods',
+  'load-debloat',
+  'update:filterBuildOnly',
+  'update:filterSucceededOnly',
+  'update:filterDevice'
+])
 </script>
 
 <template>
@@ -23,6 +35,32 @@ const emit = defineEmits(['select-job', 'open-stop', 'open-mods', 'load-debloat'
       <span>{{ t('jobs') }}</span>
       <span v-if="jobsLoading" class="h-4 w-4 animate-spin rounded-full border border-slate-500 border-t-cyan-400" />
     </h2>
+    <div class="mt-3 flex flex-wrap items-center gap-2">
+      <button
+        type="button"
+        class="rounded-md border px-2 py-1 text-xs font-semibold uppercase"
+        :class="filterBuildOnly ? 'border-cyan-400 bg-cyan-500/20 text-cyan-300' : 'border-slate-700 bg-slate-800/70 text-slate-300'"
+        @click="$emit('update:filterBuildOnly', !filterBuildOnly)"
+      >
+        {{ t('build') }}
+      </button>
+      <button
+        type="button"
+        class="rounded-md border px-2 py-1 text-xs font-semibold uppercase"
+        :class="filterSucceededOnly ? 'border-emerald-400 bg-emerald-500/20 text-emerald-300' : 'border-slate-700 bg-slate-800/70 text-slate-300'"
+        @click="$emit('update:filterSucceededOnly', !filterSucceededOnly)"
+      >
+        {{ t('succeeded') }}
+      </button>
+      <select
+        class="rounded-md border border-slate-700 bg-slate-800/70 px-2 py-1 text-xs text-slate-200"
+        :value="filterDevice"
+        @change="$emit('update:filterDevice', $event.target.value)"
+      >
+        <option value="">{{ t('allDevices') }}</option>
+        <option v-for="opt in targetOptions" :key="opt.code" :value="opt.code">{{ opt.code }}</option>
+      </select>
+    </div>
     <div class="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-auto pr-1">
       <div v-if="jobsLoading && !jobs.length" class="rounded-xl border border-slate-700 bg-slate-800/70 p-3 text-sm text-slate-300">{{ t('loading') }}</div>
       <button

@@ -1,5 +1,5 @@
 <script setup>
-import { nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { I18N, SUPPORTED_LANGS } from './lang/index.js'
 import ToastStack from './components/ToastStack.vue'
 import TopStatusBar from './components/TopStatusBar.vue'
@@ -34,6 +34,9 @@ const versionSuffix = ref('')
 const force = ref(false)
 const noRomZip = ref(false)
 const jobs = ref([])
+const jobsFilterBuildOnly = ref(false)
+const jobsFilterSucceededOnly = ref(false)
+const jobsFilterDevice = ref('')
 const selectedJob = ref(null)
 const logs = ref('')
 const loading = ref(false)
@@ -134,6 +137,15 @@ function syncJobsPanelHeight() {
 function isTerminalStatus(status) {
   return ['succeeded', 'failed', 'reused', 'canceled'].includes(String(status || ''))
 }
+
+const filteredJobs = computed(() => {
+  return jobs.value.filter((job) => {
+    if (jobsFilterBuildOnly.value && String(job?.job_kind || 'build') !== 'build') return false
+    if (jobsFilterSucceededOnly.value && String(job?.status || '') !== 'succeeded') return false
+    if (jobsFilterDevice.value && String(job?.target || '') !== jobsFilterDevice.value) return false
+    return true
+  })
+})
 
 function t(key) {
   // Фолбэк на английский, если в выбранной локали нет ключа
@@ -1122,7 +1134,11 @@ onUnmounted(() => {
       <JobsPanel
         :t="t"
         :jobs-loading="jobsLoading"
-        :jobs="jobs"
+        :jobs="filteredJobs"
+        :target-options="targetOptions"
+        :filter-build-only="jobsFilterBuildOnly"
+        :filter-succeeded-only="jobsFilterSucceededOnly"
+        :filter-device="jobsFilterDevice"
         :jobs-max-height="jobsPanelMaxHeight"
         :selected-job="selectedJob"
         :job-title="jobTitle"
@@ -1136,6 +1152,9 @@ onUnmounted(() => {
         @open-stop="openStopModal"
         @open-mods="openJobModsModal"
         @load-debloat="loadDebloatFromJob"
+        @update:filter-build-only="jobsFilterBuildOnly = $event"
+        @update:filter-succeeded-only="jobsFilterSucceededOnly = $event"
+        @update:filter-device="jobsFilterDevice = $event"
       />
 
       <LogsPanel
