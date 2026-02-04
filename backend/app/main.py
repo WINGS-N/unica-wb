@@ -5,6 +5,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
@@ -50,6 +51,63 @@ from .tasks import (
 )
 
 app = FastAPI(title=settings.app_name)
+
+_FIRMWARE_LATEST_TIMEOUT_SEC = 10.0
+_FIRMWARE_LATEST_TTL_SEC = 600.0
+_FIRMWARE_LATEST_RETRY_SEC = 60.0
+_FW_CACHE_KEY_PREFIX = "un1ca:cache:fw_latest:"
+_FW_STATS_KEY = "un1ca:cache:fw_latest:stats"
+_DIR_SIZE_TTL_SEC = 120.0
+_DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
+_DIR_STATS_KEY = "un1ca:cache:dir_size:stats"
+
+
+def _redis_get_json(key: str) -> dict:
+    try:
+        raw = redis_conn.get(key)
+        if not raw:
+            return {}
+        parsed = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+        return parsed if isinstance(parsed, dict) else {}
+    except Exception:
+        return {}
+
+
+def _redis_set_json(key: str, payload: dict):
+    try:
+        redis_conn.set(key, json.dumps(payload, ensure_ascii=True))
+    except Exception:
+        pass
+
+
+def _redis_hincr(stats_key: str, field: str, amount: int = 1):
+    try:
+        redis_conn.hincrby(stats_key, field, amount)
+    except Exception:
+        pass
+
+
+def _redis_hgetall_int(stats_key: str) -> dict[str, int]:
+    try:
+        raw = redis_conn.hgetall(stats_key)
+    except Exception:
+        return {}
+    out: dict[str, int] = {}
+    for k, v in raw.items():
+        try:
+            key = k.decode("utf-8") if isinstance(k, bytes) else str(k)
+            val = int(v.decode("utf-8") if isinstance(v, bytes) else str(v))
+            out[key] = val
+        except Exception:
+            continue
+    return out
+
+
+def _redis_count_keys(prefix: str) -> int:
+    try:
+        return sum(1 for _ in redis_conn.scan_iter(match=f"{prefix}*"))
+    except Exception:
+        return 0
 
 
 def _resolve_un1ca_root_path() -> Path | None:
@@ -116,22 +174,63 @@ def _parse_model_csc(firmware_value: str) -> tuple[str, str]:
 
 
 def _get_latest_firmware(model: str, csc: str) -> str:
-    # Берем latest версию прямо с Samsung version.xml, fallback empty string если сеть/формат недоступны.
+    # Берем latest версию с Samsung version.xml, но с TTL-кэшем и stale fallback.
     if not model or not csc:
         return ""
+    cache_key = f"{model.upper()}_{csc.upper()}"
+    redis_key = f"{_FW_CACHE_KEY_PREFIX}{cache_key}"
+    now = time.time()
+    cached = _redis_get_json(redis_key)
+    if cached:
+        cached_value = str(cached.get("value") or "")
+        fetched_at = float(cached.get("fetched_at") or 0.0)
+        attempted_at = float(cached.get("attempted_at") or 0.0)
+        if cached_value and (now - fetched_at) <= _FIRMWARE_LATEST_TTL_SEC:
+            _redis_hincr(_FW_STATS_KEY, "hits_fresh")
+            return cached_value
+        if (now - attempted_at) <= _FIRMWARE_LATEST_RETRY_SEC:
+            _redis_hincr(_FW_STATS_KEY, "hits_stale")
+            return cached_value
+    _redis_hincr(_FW_STATS_KEY, "misses")
+
     url = f"https://fota-cloud-dn.ospserver.net/firmware/{csc}/{model}/version.xml"
     try:
-        with urlopen(url, timeout=4) as resp:
+        with urlopen(url, timeout=_FIRMWARE_LATEST_TIMEOUT_SEC) as resp:
             body = resp.read().decode("utf-8", errors="ignore")
+        _redis_hincr(_FW_STATS_KEY, "net_ok")
     except (URLError, TimeoutError, OSError):
+        _redis_hincr(_FW_STATS_KEY, "net_err")
+        if cached:
+            return str(cached.get("value") or "")
+        _redis_set_json(redis_key, {
+            "value": "",
+            "fetched_at": 0.0,
+            "attempted_at": now,
+        })
         return ""
     m = re.search(r"<latest[^>]*>(.*?)</latest>", body)
-    return (m.group(1).strip() if m else "")
+    latest = (m.group(1).strip() if m else "")
+    _redis_set_json(redis_key, {
+        "value": latest,
+        "fetched_at": now if latest else 0.0,
+        "attempted_at": now,
+    })
+    return latest
 
 
 def _dir_size_bytes(path: Path) -> int:
+    cache_key = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
+    redis_key = f"{_DIR_CACHE_KEY_PREFIX}{cache_key}"
+    now = time.time()
+    cached = _redis_get_json(redis_key)
+    if cached and (now - float(cached.get("ts") or 0.0)) <= _DIR_SIZE_TTL_SEC:
+        _redis_hincr(_DIR_STATS_KEY, "hits")
+        return int(cached.get("size") or 0)
+    _redis_hincr(_DIR_STATS_KEY, "misses")
+
     total = 0
     if not path.exists():
+        _redis_set_json(redis_key, {"ts": now, "size": 0})
         return 0
     for p in path.rglob("*"):
         try:
@@ -139,6 +238,7 @@ def _dir_size_bytes(path: Path) -> int:
                 total += p.stat().st_size
         except OSError:
             pass
+    _redis_set_json(redis_key, {"ts": now, "size": total})
     return total
 
 
@@ -579,6 +679,33 @@ def readyz(db: Session = Depends(get_db)):
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=503, content={"status": "down", "reason": str(exc)})
     return {"status": "ready"}
+
+
+@app.get(f"{settings.api_prefix}/debug/perf")
+def debug_perf():
+    fw_stats = _redis_hgetall_int(_FW_STATS_KEY)
+    dir_stats = _redis_hgetall_int(_DIR_STATS_KEY)
+    return {
+        "firmware_latest_cache": {
+            "storage": "redis",
+            "entries": _redis_count_keys(_FW_CACHE_KEY_PREFIX),
+            "ttl_sec": _FIRMWARE_LATEST_TTL_SEC,
+            "retry_sec": _FIRMWARE_LATEST_RETRY_SEC,
+            "timeout_sec": _FIRMWARE_LATEST_TIMEOUT_SEC,
+            "hits_fresh": fw_stats.get("hits_fresh", 0),
+            "hits_stale": fw_stats.get("hits_stale", 0),
+            "misses": fw_stats.get("misses", 0),
+            "net_ok": fw_stats.get("net_ok", 0),
+            "net_err": fw_stats.get("net_err", 0),
+        },
+        "dir_size_cache": {
+            "storage": "redis",
+            "entries": _redis_count_keys(_DIR_CACHE_KEY_PREFIX),
+            "ttl_sec": _DIR_SIZE_TTL_SEC,
+            "hits": dir_stats.get("hits", 0),
+            "misses": dir_stats.get("misses", 0),
+        },
+    }
 
 
 @app.post(f"{settings.api_prefix}/jobs", response_model=BuildJobRead)

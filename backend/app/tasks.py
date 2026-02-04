@@ -8,6 +8,7 @@ import shutil
 import shlex
 import subprocess
 import time
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -67,6 +68,7 @@ _RE_SPEED = re.compile(r"(?P<spd>\d+(?:\.\d+)?)\s*(?P<su>[KMGTP]?i?B)/s", re.IGN
 _RE_ELAPSED_ETA = re.compile(r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)<(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
 _RE_GIT_PERCENT = re.compile(r"(\d{1,3})%")
 _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B/s)", re.IGNORECASE)
+_DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 
 
 def _guess_fw_key(text: str, known_keys: list[str]) -> str:
@@ -141,6 +143,32 @@ def _repo_root_dir() -> Path:
     if (nested / ".git").is_dir() or (nested / "target").is_dir():
         return nested
     return base
+
+
+def _dir_cache_key_for_path(path: Path) -> str:
+    digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
+    return f"{_DIR_CACHE_KEY_PREFIX}{digest}"
+
+
+def _invalidate_dir_size_cache_paths(paths: list[Path]):
+    # Event-based invalidation for size cache so UI gets fresh values right after filesystem ops.
+    keys = []
+    seen = set()
+    for path in paths:
+        p = Path(path)
+        variants = [p, p.parent]
+        for v in variants:
+            key = _dir_cache_key_for_path(v)
+            if key in seen:
+                continue
+            seen.add(key)
+            keys.append(key)
+    if not keys:
+        return
+    try:
+        redis_conn.delete(*keys)
+    except Exception:
+        pass
 
 
 def _repo_progress_from_line(line: str, started_at: float) -> dict:
@@ -381,6 +409,9 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
             f"scripts/extract_fw.sh --ignore-source --ignore-target --force "
             f"{shlex.quote(fw_key.replace('_', '/', 1) + '/350000000000000')}"
         )
+        out_root = Path(settings.out_dir)
+        odin_dir = out_root / "odin" / fw_key
+        fw_dir = out_root / "fw" / fw_key
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         tracker = _FirmwareProgressTracker(job_id, [fw_key.upper()], phase="extract")
@@ -433,6 +464,7 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
                 finally:
                     db.close()
                 tracker.finalize(ok)
+                _invalidate_dir_size_cache_paths([odin_dir, fw_dir, out_root / "odin", out_root / "fw"])
 
     _run_operation_job(job_id, _op)
 
@@ -457,6 +489,7 @@ def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
             target.unlink(missing_ok=True)
             with log_file.open("ab") as lf:
                 lf.write(f"[delete] removed file: {target}\n".encode("utf-8"))
+        _invalidate_dir_size_cache_paths([target, base])
 
     _run_operation_job(job_id, _delete)
 
@@ -528,6 +561,7 @@ def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
             if dst_out.exists():
                 shutil.rmtree(dst_out, ignore_errors=True)
             shutil.move(str(keep_out_tmp), str(dst_out))
+        _invalidate_dir_size_cache_paths([repo_dir])
         _repo_set_progress({"type": "progress", "status": "completed", "stage": "clone", "title": "Repository clone completed", "percent": 100})
 
     _run_operation_job(job_id, _op)
@@ -559,6 +593,7 @@ def run_repo_pull_job(job_id: str, git_ref: str):
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+        _invalidate_dir_size_cache_paths([root])
         _repo_set_progress({"type": "progress", "status": "completed", "stage": "pull", "title": "Repository updated", "percent": 100})
 
     _run_operation_job(job_id, _op)
@@ -587,6 +622,7 @@ def run_repo_submodules_job(job_id: str):
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+        _invalidate_dir_size_cache_paths([root])
         _repo_set_progress({"type": "progress", "status": "completed", "stage": "submodules", "title": "Submodules updated", "percent": 100})
 
     _run_operation_job(job_id, _op)
@@ -611,6 +647,7 @@ def run_repo_delete_job(job_id: str, mode: str = "repo_only"):
                         shutil.rmtree(item, ignore_errors=True)
                     else:
                         item.unlink(missing_ok=True)
+        _invalidate_dir_size_cache_paths([root])
         title = "Repository removed with out" if mode == "repo_with_out" else "Repository removed, out preserved"
         _repo_set_progress({"type": "progress", "status": "completed", "stage": "delete", "title": title, "percent": 100})
 
@@ -875,4 +912,18 @@ def run_build_job(job_id: str):
                 Path(job.extra_mods_archive_path).unlink(missing_ok=True)
             except Exception:
                 pass
+        # Build may download/extract firmware and mutate out tree, invalidate size cache keys.
+        # Also invalidate source/target fw specific dirs to reflect updated markers/sizes immediately.
+        source_key = ""
+        target_key = ""
+        if job:
+            source_key = _firmware_key_from_value(job.source_firmware)
+            target_key = _firmware_key_from_value(job.target_firmware)
+        out_root = Path(settings.out_dir)
+        paths = [out_root / "odin", out_root / "fw"]
+        if source_key:
+            paths.extend([out_root / "odin" / source_key, out_root / "fw" / source_key])
+        if target_key and target_key != source_key:
+            paths.extend([out_root / "odin" / target_key, out_root / "fw" / target_key])
+        _invalidate_dir_size_cache_paths(paths)
         db.close()
