@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron'
 import { spawn } from 'node:child_process'
-import { existsSync, readFileSync, mkdirSync, copyFileSync } from 'node:fs'
+import { existsSync, readFileSync, mkdirSync, copyFileSync, writeFileSync } from 'node:fs'
 import { resolve, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import http from 'node:http'
@@ -729,10 +729,43 @@ function composeArgs(action, extra = []) {
 function prepareComposeRuntimeFiles() {
   // В AppImage resources лежат в FUSE mount, root-команды не всегда читают их.
   // In AppImage resources are on FUSE mount, root commands may fail to read them.
+  const passthroughEnvKeys = [
+    'LOCAL_UN1CA_PATH',
+    'GIT_URL',
+    'GIT_REF',
+    'GHCR_OWNER',
+    'IMAGE_API',
+    'IMAGE_WORKER',
+    'IMAGE_FRONTEND'
+  ]
+  const renderEnvLine = (key, value) => {
+    const raw = String(value ?? '')
+    if (!raw) return ''
+    // Minimal .env escaping for spaces/quotes/backslashes.
+    const escaped = raw.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    return `${key}="${escaped}"`
+  }
+
   if (!app.isPackaged) {
     composeFiles = [...COMPOSE_FILES_SOURCE]
-    composeEnvFile = existsSync(join(WB_ROOT, '.env')) ? join(WB_ROOT, '.env') : ''
     composeCwd = WB_ROOT
+    const lines = []
+    const srcEnv = join(WB_ROOT, '.env')
+    if (existsSync(srcEnv)) {
+      lines.push(readFileSync(srcEnv, 'utf8').trimEnd())
+    }
+    for (const key of passthroughEnvKeys) {
+      const v = process.env[key]
+      if (!v) continue
+      lines.push(renderEnvLine(key, v))
+    }
+    if (lines.length) {
+      const runtimeEnv = join(WB_ROOT, '.env.runtime')
+      writeFileSync(runtimeEnv, `${lines.filter(Boolean).join('\n')}\n`, 'utf8')
+      composeEnvFile = runtimeEnv
+    } else {
+      composeEnvFile = ''
+    }
     return
   }
 
@@ -749,9 +782,18 @@ function prepareComposeRuntimeFiles() {
   }
 
   const srcEnv = join(WB_ROOT, '.env')
+  const dstEnv = join(runtimeDir, '.env')
+  const lines = []
   if (existsSync(srcEnv)) {
-    const dstEnv = join(runtimeDir, '.env')
-    copyFileSync(srcEnv, dstEnv)
+    lines.push(readFileSync(srcEnv, 'utf8').trimEnd())
+  }
+  for (const key of passthroughEnvKeys) {
+    const v = process.env[key]
+    if (!v) continue
+    lines.push(renderEnvLine(key, v))
+  }
+  if (lines.length) {
+    writeFileSync(dstEnv, `${lines.filter(Boolean).join('\n')}\n`, 'utf8')
     composeEnvFile = dstEnv
   } else {
     composeEnvFile = ''
