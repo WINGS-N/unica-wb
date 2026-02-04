@@ -14,11 +14,14 @@
     "dev": "electron .",
     "seed:export": "./scripts/export-seed-images.sh",
     "ci:pack:linux": "electron-builder --linux AppImage deb",
+    "ci:pack:linux:no-seed": "electron-builder --config electron-builder.no-seed.json --linux AppImage deb",
     "ci:pack:win": "electron-builder --win nsis portable",
     "docker:pack:linux": "./scripts/build-docker.sh linux",
+    "docker:pack:linux:no-seed": "./scripts/build-docker.sh linux-no-seed",
     "docker:pack:win": "./scripts/build-docker.sh win",
     "docker:pack:all": "./scripts/build-docker.sh all",
     "pack:linux": "electron-builder --linux AppImage deb",
+    "pack:linux:no-seed": "electron-builder --config electron-builder.no-seed.json --linux AppImage deb",
     "pack:win": "electron-builder --win nsis portable"
   },
   "devDependencies": {

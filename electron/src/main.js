@@ -713,6 +713,53 @@ async function maybeUpdateImages(manifest) {
   }
 }
 
+function isUnicaWbImageRef(ref) {
+  const s = String(ref || '').toLowerCase()
+  if (!s || s.includes('<none>')) return false
+  return s.includes('/unica-wb-') || s.startsWith('unica-wb-')
+}
+
+function uniqNonEmpty(items) {
+  return Array.from(new Set((items || []).map((x) => String(x || '').trim()).filter(Boolean)))
+}
+
+async function cleanupUnusedUnicaImages(manifest) {
+  if (process.env.ELECTRON_CLEANUP_IMAGES_ON_START === '0') return
+
+  const keep = new Set(
+    uniqNonEmpty([
+      process.env.IMAGE_API,
+      process.env.IMAGE_WORKER,
+      process.env.IMAGE_FRONTEND,
+      ...(manifest?.images || []).flatMap((item) => [
+        item?.local_tag,
+        item?.remote,
+        item?.remote_latest,
+        resolvePullRemoteRef(item)
+      ])
+    ])
+  )
+
+  const out = await runDocker(['image', 'ls', '--format', '{{.Repository}}:{{.Tag}}'], { timeoutMs: 15000 }).catch(() => ({ stdout: '' }))
+  const refs = String(out.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+  const candidates = refs.filter((ref) => isUnicaWbImageRef(ref) && !keep.has(ref))
+  if (!candidates.length) {
+    emitStartupProgress('health', 99, 'Docker image cleanup: nothing to remove')
+    return
+  }
+
+  emitStartupProgress('health', 98, `Cleaning unused docker images (${candidates.length})`)
+  for (let i = 0; i < candidates.length; i += 1) {
+    const ref = candidates[i]
+    const p = 98 + Math.round(((i + 1) / candidates.length))
+    emitStartupProgress('health', Math.min(99, p), `Removing image ${ref}`)
+    await runDocker(['image', 'rm', ref], { timeoutMs: 15000 }).catch(() => {})
+  }
+
+  await runDocker(['image', 'prune', '-f'], { timeoutMs: 15000 }).catch(() => {})
+  emitStartupProgress('health', 99, 'Docker image cleanup complete')
+}
+
 function composeArgs(action, extra = []) {
   const envFileArgs = composeEnvFile ? ['--env-file', composeEnvFile] : []
   return [
@@ -1048,6 +1095,7 @@ async function startup() {
     await maybeUpdateImages(manifest)
     await composeUp()
     await waitUntilReady()
+    await cleanupUnusedUnicaImages(manifest)
     emitProgress({ stage: 'health', progress: 100, totalProgress: 100, message: 'Startup complete' })
 
     createMainWindow()
