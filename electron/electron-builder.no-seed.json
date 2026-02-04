@@ -1,0 +1,16 @@
+{
+  "extends": "./package.json",
+  "extraResources": [
+    {
+      "from": "../docker-compose.yml",
+      "to": "docker-compose.yml"
+    },
+    {
+      "from": "../docker-compose.local-repo.yml",
+      "to": "docker-compose.local-repo.yml"
+    }
+  ],
+  "linux": {
+    "artifactName": "unica-wb-${version}-no-seed.${ext}"
+  }
+}

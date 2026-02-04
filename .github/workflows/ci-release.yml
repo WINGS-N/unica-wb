@@ -197,8 +197,10 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      - name: Build Linux artifacts
-        run: pnpm run ci:pack:linux
+      - name: Build Linux artifacts (seed + no-seed)
+        run: |
+          pnpm run ci:pack:linux
+          pnpm run ci:pack:linux:no-seed
 
       - name: Collect artifacts
         run: |
