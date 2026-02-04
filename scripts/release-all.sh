@@ -32,7 +32,7 @@ fi
 echo "[1/4] Build docker images via compose"
 (
   cd "${ROOT_DIR}"
-  docker compose -f docker-compose.yml build unica-wb-api unica-wb-worker unica-wb-frontend
+  docker compose -f docker-compose.yml build api worker frontend
 )
 
 echo "[2/4] Export seed images"

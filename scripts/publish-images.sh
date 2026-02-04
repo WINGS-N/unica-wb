@@ -28,7 +28,7 @@ echo "  IMAGE_API=${IMAGE_API}"
 echo "  IMAGE_WORKER=${IMAGE_WORKER}"
 echo "  IMAGE_FRONTEND=${IMAGE_FRONTEND}"
 
-docker compose -f docker-compose.yml build unica-wb-api unica-wb-worker unica-wb-frontend
-docker compose -f docker-compose.yml push unica-wb-api unica-wb-worker unica-wb-frontend
+docker compose -f docker-compose.yml build api worker frontend
+docker compose -f docker-compose.yml push api worker frontend
 
 echo "Publish done"

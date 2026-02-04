@@ -8,7 +8,7 @@ services:
       timeout: 3s
       retries: 10
 
-  unica-wb-api:
+  api:
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -39,7 +39,7 @@ services:
       - "0.0.0.0:8000:8000"
     stop_grace_period: 30s
 
-  unica-wb-worker:
+  worker:
     build:
       context: .
       dockerfile: backend/Dockerfile
@@ -57,7 +57,7 @@ services:
     depends_on:
       redis:
         condition: service_healthy
-      unica-wb-api:
+      api:
         condition: service_started
     volumes:
       - shared-data:/data
@@ -92,14 +92,14 @@ services:
       start_period: 20s
     stop_grace_period: 600s
 
-  unica-wb-frontend:
+  frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     image: ${IMAGE_FRONTEND:-unica-wb-frontend:local}
     restart: unless-stopped
     depends_on:
-      unica-wb-api:
+      api:
         condition: service_healthy
     ports:
       - "0.0.0.0:8080:80"

@@ -1,5 +1,5 @@
 services:
-  unica-wb-api:
+  api:
     depends_on:
       redis:
         condition: service_healthy
@@ -7,11 +7,11 @@ services:
       - shared-data:/data
       - ${LOCAL_UN1CA_PATH:?Set LOCAL_UN1CA_PATH in unica-wb/.env for local bind-mount mode}:/workspace/UN1CA
 
-  unica-wb-worker:
+  worker:
     depends_on:
       redis:
         condition: service_healthy
-      unica-wb-api:
+      api:
         condition: service_started
     volumes:
       - shared-data:/data
