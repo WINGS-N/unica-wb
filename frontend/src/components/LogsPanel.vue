@@ -2,6 +2,7 @@
 defineProps({
   t: { type: Function, required: true },
   logTailKb: { type: Number, required: true },
+  followLogs: { type: Boolean, required: true },
   selectedJob: { type: Object, default: null },
   logs: { type: String, required: true },
   logsPlaceholder: { type: String, required: true },
@@ -9,7 +10,7 @@ defineProps({
   apiPrefix: { type: String, required: true }
 })
 
-const emit = defineEmits(['update:logTailKb', 'log-tail-change'])
+const emit = defineEmits(['update:logTailKb', 'update:followLogs', 'log-tail-change'])
 </script>
 
 <template>
@@ -29,6 +30,14 @@ const emit = defineEmits(['update:logTailKb', 'log-tail-change'])
           <option :value="512">512</option>
           <option :value="1024">1024</option>
         </select>
+        <button
+          type="button"
+          class="rounded-lg border px-2 py-1 text-xs font-medium"
+          :class="followLogs ? 'border-emerald-600 bg-emerald-500/20 text-emerald-200' : 'border-slate-700 bg-slate-900 text-slate-300'"
+          @click="$emit('update:followLogs', !followLogs)"
+        >
+          {{ t('followLogs') }}
+        </button>
         <a v-if="selectedJob?.artifact_path" :href="`${apiBase}${apiPrefix}/jobs/${selectedJob.id}/artifact`" class="rounded-lg bg-emerald-500 px-3 py-1 text-sm font-medium text-slate-950 hover:bg-emerald-400">{{ t('downloadZip') }}</a>
       </div>
     </div>

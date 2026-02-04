@@ -84,6 +84,7 @@
   "debloatDisabledShort": "Debloat disabled",
   "logs": "Logs",
   "tailKb": "Tail KB",
+  "followLogs": "Follow logs",
   "downloadZip": "Download ZIP",
   "downloadLatestForTarget": "Latest ZIP",
   "selectJobToStream": "Select job to stream logs...",

@@ -84,6 +84,7 @@
   "debloatDisabledShort": "Debloat отключено",
   "logs": "Логи",
   "tailKb": "Хвост логов (КБ)",
+  "followLogs": "Следить за логом",
   "downloadZip": "Скачать ZIP",
   "downloadLatestForTarget": "Последний ZIP",
   "selectJobToStream": "Выберите задачу для просмотра логов...",

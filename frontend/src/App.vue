@@ -1,5 +1,5 @@
 <script setup>
-import { onMounted, onUnmounted, ref } from 'vue'
+import { nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { I18N, SUPPORTED_LANGS } from './lang/index.js'
 import ToastStack from './components/ToastStack.vue'
 import TopStatusBar from './components/TopStatusBar.vue'
@@ -19,6 +19,7 @@ const API_BASE = import.meta.env.VITE_API_BASE || ''
 const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/api/v1'
 const STORAGE_SELECTED_JOB = 'un1ca:selectedJobId'
 const STORAGE_LOG_TAIL_KB = 'un1ca:logTailKb'
+const STORAGE_FOLLOW_LOGS = 'un1ca:followLogs'
 const STORAGE_LANGUAGE = 'un1ca:lang'
 
 const target = ref('')
@@ -39,6 +40,7 @@ const loading = ref(false)
 const defaultsLoading = ref(false)
 const jobsLoading = ref(false)
 const logTailKb = ref(64)
+const followLogs = ref(true)
 const stopModalOpen = ref(false)
 const stopTargetJob = ref(null)
 const stopSignalType = ref('sigterm')
@@ -121,6 +123,10 @@ let repoProgressReconnect = null
 let repoProgressShouldReconnect = true
 let repoUrlSaveTimer = null
 let timer = null
+
+function isTerminalStatus(status) {
+  return ['succeeded', 'failed', 'reused', 'canceled'].includes(String(status || ''))
+}
 
 function t(key) {
   // Фолбэк на английский, если в выбранной локали нет ключа
@@ -917,32 +923,61 @@ function openLogs(jobId) {
   closeLogs()
   activeLogJobId.value = jobId
   evtSource = new WebSocket(`${getWebSocketUrl(jobId)}?tail_kb=${logTailKb.value}`)
-  evtSource.onmessage = (event) => {
+  evtSource.onmessage = async (event) => {
+    const el = document.getElementById('logs')
+    const wasNearBottom = el ? (el.scrollHeight - el.scrollTop - el.clientHeight) < 24 : true
+    const keepBottomOffset = el ? (el.scrollHeight - el.scrollTop) : 0
+    const before = logs.value
+    let nextLogs = logs.value
+    let changed = false
     try {
       const payload = JSON.parse(event.data)
       if (payload.type === 'chunk') {
         const chunk = stripAnsi(payload.chunk || '')
-        for (const ch of chunk) {
-          if (ch === '\r') {
-            logs.value = logs.value.replace(/[^\n]*$/, '')
-          } else {
-            logs.value += ch
+        if (chunk) {
+          for (const ch of chunk) {
+            if (ch === '\r') {
+              nextLogs = nextLogs.replace(/[^\n]*$/, '')
+            } else {
+              nextLogs += ch
+            }
           }
+          changed = nextLogs !== before
         }
-        if (logs.value.length > 2_000_000) {
-          logs.value = logs.value.slice(-1_500_000)
+        if (nextLogs.length > 2_000_000) {
+          nextLogs = nextLogs.slice(-1_500_000)
+          changed = true
         }
       }
     } catch {
-      logs.value += stripAnsi(event.data || '') + '\n'
+      const text = stripAnsi(event.data || '')
+      if (text) {
+        nextLogs += `${text}\n`
+        changed = true
+      }
     }
-    const el = document.getElementById('logs')
-    if (el) {
-      el.scrollTop = el.scrollHeight
+    if (changed) {
+      logs.value = nextLogs
+      await nextTick()
+      const updated = document.getElementById('logs')
+      if (!updated) return
+      if (followLogs.value && wasNearBottom) {
+        updated.scrollTop = updated.scrollHeight
+      } else {
+        // Keep visual position stable when not following live tail.
+        updated.scrollTop = Math.max(0, updated.scrollHeight - keepBottomOffset)
+      }
     }
   }
   evtSource.onclose = () => {
     evtSource = null
+    const selectedId = selectedJob.value?.id
+    const selectedStatus = selectedJob.value?.status
+    if (selectedId === jobId && isTerminalStatus(selectedStatus)) {
+      // Keep marker for finished job so polling does not re-open WS every 5s.
+      activeLogJobId.value = jobId
+      return
+    }
     activeLogJobId.value = ''
   }
 }
@@ -951,7 +986,7 @@ function ensureSelectedJobLogsAttached() {
   const job = selectedJob.value
   if (!job) return
   if (job.log_path && activeLogJobId.value !== job.id) {
-    logs.value = ''
+    if (isTerminalStatus(job.status) && logs.value) return
     openLogs(job.id)
   }
 }
@@ -990,6 +1025,10 @@ onMounted(async () => {
   const storedTail = Number(localStorage.getItem(STORAGE_LOG_TAIL_KB))
   if ([64, 128, 256, 512, 1024].includes(storedTail)) {
     logTailKb.value = storedTail
+  }
+  const storedFollow = localStorage.getItem(STORAGE_FOLLOW_LOGS)
+  if (storedFollow === '0') {
+    followLogs.value = false
   }
   await fetchDefaults()
   await fetchJobs()
@@ -1085,6 +1124,7 @@ onUnmounted(() => {
 
       <LogsPanel
         v-model:log-tail-kb="logTailKb"
+        v-model:follow-logs="followLogs"
         :t="t"
         :selected-job="selectedJob"
         :logs="logs"
@@ -1092,6 +1132,7 @@ onUnmounted(() => {
         :api-base="API_BASE"
         :api-prefix="API_PREFIX"
         @log-tail-change="onLogTailChange"
+        @update:follow-logs="localStorage.setItem(STORAGE_FOLLOW_LOGS, $event ? '1' : '0')"
       />
     </div>
     <StopJobModal
