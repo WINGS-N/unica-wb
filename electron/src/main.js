@@ -485,6 +485,19 @@ function repoFromImageRef(ref) {
   return noDigest
 }
 
+function resolvePullRemoteRef(item) {
+  const defaultRemote = String(item?.remote || '').trim()
+  const remoteLatest = String(item?.remote_latest || '').trim()
+  const pullTag = String(process.env.ELECTRON_PULL_TAG || 'latest').trim()
+
+  if (!pullTag) return defaultRemote || remoteLatest
+  if (pullTag === 'latest' && remoteLatest) return remoteLatest
+
+  const baseRepo = repoFromImageRef(defaultRemote || remoteLatest)
+  if (!baseRepo) return defaultRemote || remoteLatest
+  return `${baseRepo}:${pullTag}`
+}
+
 async function dockerLocalRepoDigest(ref, repoHint = '') {
   try {
     const out = await runDocker(['image', 'inspect', '--format', '{{json .RepoDigests}}', ref])
@@ -570,8 +583,9 @@ async function ensureSeedImages(manifest) {
   emitStartupProgress('seed', 100, 'Seed images are ready')
 }
 
-async function pullAndRetagImage(item, index, total) {
-  if (!item.remote || !item.local_tag) return
+async function pullAndRetagImage(item, index, total, remoteRef) {
+  const pullRef = String(remoteRef || '').trim()
+  if (!pullRef || !item.local_tag) return
 
   const layerMap = new Map()
   let lastBytes = 0
@@ -601,7 +615,7 @@ async function pullAndRetagImage(item, index, total) {
       emitProgress({
         stage: 'pull',
         progress: Math.round(((index + 1) / total) * 100),
-        message: `Pulling ${item.remote}`,
+        message: `Pulling ${pullRef}`,
         downloaded,
         total: size,
         speed
@@ -618,13 +632,13 @@ async function pullAndRetagImage(item, index, total) {
     }
   }
 
-  await runDocker(['pull', item.remote], {
+  await runDocker(['pull', pullRef], {
     onStdout: publishPullMessage,
     onStderr: publishPullMessage
   })
 
-  if (item.remote !== item.local_tag) {
-    await runDocker(['tag', item.remote, item.local_tag])
+  if (pullRef !== item.local_tag) {
+    await runDocker(['tag', pullRef, item.local_tag])
   }
 }
 
@@ -642,7 +656,7 @@ async function maybeUpdateImages(manifest) {
   for (let i = 0; i < manifest.images.length; i += 1) {
     const item = manifest.images[i]
     const localTag = item?.local_tag || 'local image'
-    const remoteRef = item?.remote || ''
+    const remoteRef = resolvePullRemoteRef(item)
     const expectedId = String(item?.image_id || '').trim()
     if (localTag && expectedId) {
       const localId = await dockerImageId(localTag)
@@ -672,13 +686,13 @@ async function maybeUpdateImages(manifest) {
         }
       }
     }
-    emitStartupProgress(
-      'pull',
-      Math.round((i / manifest.images.length) * 100),
-      `Pulling docker image ${item.remote || item.local_tag || 'unknown'}`
-    )
+      emitStartupProgress(
+        'pull',
+        Math.round((i / manifest.images.length) * 100),
+        `Pulling docker image ${remoteRef || item.local_tag || 'unknown'}`
+      )
     try {
-      await pullAndRetagImage(item, i, manifest.images.length)
+      await pullAndRetagImage(item, i, manifest.images.length, remoteRef)
     } catch (error) {
       failedPulls += 1
       const errText = (error?.message || '').trim()

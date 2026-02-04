@@ -10,6 +10,7 @@ MANIFEST_PATH="${SEED_DIR}/manifest.json"
 TMP_DIR="$(mktemp -d)"
 ZSTD_LEVEL="${SEED_ZSTD_LEVEL:-19}"
 GHCR_OWNER="${GHCR_OWNER:-wings-n}"
+SEED_REMOTE_PREFER_LATEST="${SEED_REMOTE_PREFER_LATEST:-1}"
 
 cleanup() {
   rm -rf "${TMP_DIR}"
@@ -36,6 +37,17 @@ if [ -f "${ROOT_DIR}/../.env" ]; then
 fi
 
 GHCR_OWNER="${GHCR_OWNER:-wings-n}"
+
+repo_from_ref() {
+  local ref="$1"
+  ref="${ref%%@*}"
+  local tail="${ref##*/}"
+  if [[ "$tail" == *:* ]]; then
+    echo "${ref%:*}"
+  else
+    echo "$ref"
+  fi
+}
 
 mkdir -p "${SEED_DIR}"
 
@@ -109,6 +121,10 @@ for idx in "${!SOURCE_IMAGES[@]}"; do
       remote="ghcr.io/${GHCR_OWNER}/${base_name}:latest"
     fi
   fi
+  remote_latest="$(repo_from_ref "${remote}"):latest"
+  if [ "${SEED_REMOTE_PREFER_LATEST}" = "1" ]; then
+    remote="${remote_latest}"
+  fi
 
   # Если source не :local, даем :local alias, чтобы после docker load Electron нашел local_tag
   # If source is not :local, create :local alias so after docker load Electron can find local_tag
@@ -125,10 +141,11 @@ for idx in "${!SOURCE_IMAGES[@]}"; do
   image_id="$(docker image inspect --format='{{.Id}}' "${source_image}")"
   created_at="$(docker image inspect --format='{{.Created}}' "${source_image}")"
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "${archive_name}" \
     "${local_tag}" \
     "${remote}" \
+    "${remote_latest}" \
     "${image_id}" \
     "${created_at}" \
     "${size_bytes}" \
@@ -147,12 +164,13 @@ items = []
 for raw in rows_path.read_text().splitlines():
     if not raw.strip():
         continue
-    archive, local_tag, remote, image_id, created_at, size_bytes, sha256 = raw.split("\t")
+    archive, local_tag, remote, remote_latest, image_id, created_at, size_bytes, sha256 = raw.split("\t")
     items.append(
         {
             "archive": archive,
             "local_tag": local_tag,
             "remote": remote,
+            "remote_latest": remote_latest,
             "image_id": image_id,
             "created_at": created_at,
             "size_bytes": int(size_bytes),
