@@ -11,6 +11,7 @@ class BuildJobCreate(BaseModel):
     version_patch: int | None = Field(default=None, ge=0, le=999)
     version_suffix: str | None = Field(default=None, max_length=64)
     extra_mods_upload_id: str | None = Field(default=None, min_length=8, max_length=64)
+    mods_disabled: list[str] | None = None
     debloat_disabled: list[str] | None = None
     debloat_add_system: list[str] | None = None
     debloat_add_product: list[str] | None = None
@@ -44,6 +45,7 @@ class BuildJobRead(BaseModel):
     debloat_disabled_json: str | None
     debloat_add_system_json: str | None
     debloat_add_product_json: str | None
+    mods_disabled_json: str | None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

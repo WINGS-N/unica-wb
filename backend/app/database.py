@@ -57,6 +57,8 @@ def run_migrations():
         statements.append("ALTER TABLE build_jobs ADD COLUMN debloat_add_system_json TEXT")
     if "debloat_add_product_json" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN debloat_add_product_json TEXT")
+    if "mods_disabled_json" not in cols:
+        statements.append("ALTER TABLE build_jobs ADD COLUMN mods_disabled_json TEXT")
 
     if not statements:
         return

@@ -15,6 +15,7 @@ from pathlib import Path
 from .config import settings
 from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
+from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
 from .firmware_progress import set_progress
 from .repo_progress import clear_progress as clear_repo_progress, set_progress as set_repo_progress
 from .mods_archive import validate_mods_archive
@@ -734,7 +735,9 @@ def run_build_job(job_id: str):
     # Основная build pipeline: overrides, extra mods, debloat patching, make_rom, artifact detect.
     db = SessionLocal()
     extra_mods_tmp_dir = None
-    applied_mod_dirs: list[Path] = []
+    injected_mod_dirs: list[Path] = []
+    replaced_mod_dirs: list[tuple[Path, Path]] = []
+    mods_override_state: dict | None = None
     debloat_override_paths: tuple[Path, Path] | None = None
     try:
         job = db.get(BuildJob, job_id)
@@ -772,21 +775,30 @@ def run_build_job(job_id: str):
             override_exports.append(f"export ROM_VERSION={shlex.quote(rom_version)}")
 
         if job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
-            # Загруженные extra mods копируем как временные .uploaded-* директории только на время этой сборки.
+            # Extra mods применяем только на время этой сборки:
+            # - если мод новый, просто добавляем его в unica/mods
+            # - если имя совпадает с оригинальным модом, временно полностью заменяем оригинал
             extra_mods_tmp_dir = Path(settings.data_dir) / "tmp-extra-mods" / job.id
             extra_mods_tmp_dir.mkdir(parents=True, exist_ok=True)
             validated = validate_mods_archive(Path(job.extra_mods_archive_path), extra_mods_tmp_dir)
             modules_root = Path(validated["modules_root"])
             target_mods_dir = Path(settings.un1ca_root) / "unica" / "mods"
             target_mods_dir.mkdir(parents=True, exist_ok=True)
+            backup_mods_root = extra_mods_tmp_dir / "_original_mods_backup"
+            backup_mods_root.mkdir(parents=True, exist_ok=True)
             for module_dir in sorted(modules_root.iterdir(), key=lambda x: x.name):
                 if not module_dir.is_dir() or not (module_dir / "module.prop").is_file():
                     continue
-                dst = target_mods_dir / f".uploaded-{job.id[:8]}-{module_dir.name}"
+                dst = target_mods_dir / module_dir.name
                 if dst.exists():
-                    shutil.rmtree(dst, ignore_errors=True)
+                    backup_dst = backup_mods_root / module_dir.name
+                    if backup_dst.exists():
+                        shutil.rmtree(backup_dst, ignore_errors=True)
+                    shutil.move(str(dst), str(backup_dst))
+                    replaced_mod_dirs.append((dst, backup_dst))
                 shutil.copytree(module_dir, dst, symlinks=True)
-                applied_mod_dirs.append(dst)
+                if not any(original == dst for original, _ in replaced_mod_dirs):
+                    injected_mod_dirs.append(dst)
             if "--force" not in flags:
                 flags.append("--force")
         if job.debloat_disabled_json or job.debloat_add_system_json or job.debloat_add_product_json:
@@ -805,6 +817,18 @@ def run_build_job(job_id: str):
                 if debloat_override_paths:
                     if "--force" not in flags:
                         flags.append("--force")
+            except Exception:
+                pass
+        if job.mods_disabled_json:
+            try:
+                mods_disabled = json.loads(job.mods_disabled_json or "[]")
+                if isinstance(mods_disabled, list):
+                    mods_override_state = apply_mods_disabled_overrides(
+                        Path(settings.un1ca_root),
+                        mods_disabled,
+                    )
+                if mods_override_state and "--force" not in flags:
+                    flags.append("--force")
             except Exception:
                 pass
 
@@ -887,13 +911,21 @@ def run_build_job(job_id: str):
             job.process_pid = None
             db.commit()
     finally:
-        for mod_dir in applied_mod_dirs:
+        for mod_dir in injected_mod_dirs:
             if mod_dir.exists():
                 shutil.rmtree(mod_dir, ignore_errors=True)
+        for overridden_path, backup_path in reversed(replaced_mod_dirs):
+            if overridden_path.exists():
+                shutil.rmtree(overridden_path, ignore_errors=True)
+            if backup_path.exists():
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(backup_path), str(overridden_path))
         if extra_mods_tmp_dir and extra_mods_tmp_dir.exists():
             shutil.rmtree(extra_mods_tmp_dir, ignore_errors=True)
         if debloat_override_paths:
             restore_debloat_file(*debloat_override_paths)
+        if mods_override_state:
+            restore_mods_overrides(mods_override_state)
         job = db.get(BuildJob, job_id)
         if job and job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
             try:

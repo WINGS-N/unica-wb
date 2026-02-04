@@ -24,6 +24,7 @@ from .config import settings
 from .cleanup import cleanup_stale_build_overrides
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
+from .mods_utils import parse_unica_mod_entries
 from .firmware_progress import PROGRESS_CHANNEL, clear_progress, list_progress
 from .mods_archive import (
     ModsArchiveError,
@@ -508,6 +509,7 @@ def _build_signature(
     debloat_signature: str,
     debloat_add_system_signature: str,
     debloat_add_product_signature: str,
+    mods_signature: str,
 ) -> str:
     # Сигнатура сборки нужна для reuse готового ZIP без повторной сборки.
     payload = "|".join(
@@ -524,6 +526,7 @@ def _build_signature(
             debloat_signature,
             debloat_add_system_signature,
             debloat_add_product_signature,
+            mods_signature,
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
@@ -1043,6 +1046,17 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         extra_mods_signature = hashlib.sha256(extra_mods_modules_json.encode("utf-8")).hexdigest()[:16]
 
     debloat_disabled = payload.debloat_disabled or []
+    mods_disabled = payload.mods_disabled
+    mods_disabled_json = None
+    mods_signature = ""
+    if mods_disabled is not None:
+        valid_mod_ids = {x["id"] for x in parse_unica_mod_entries(_resolve_un1ca_root_path() or Path(settings.un1ca_root))}
+        unknown_mods = [x for x in mods_disabled if x not in valid_mod_ids]
+        if unknown_mods:
+            raise HTTPException(400, f"Unknown mod ids: {', '.join(unknown_mods[:5])}")
+        mods_disabled_json = json.dumps(sorted(set(mods_disabled)), ensure_ascii=True)
+        mods_signature = hashlib.sha256(mods_disabled_json.encode("utf-8")).hexdigest()[:16]
+
     valid_debloat_ids = {x["id"] for x in parse_unica_debloat_entries(_resolve_un1ca_root_path() or Path(settings.un1ca_root))}
     if debloat_disabled:
         unknown = [x for x in debloat_disabled if x not in valid_debloat_ids]
@@ -1069,6 +1083,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         debloat_signature,
         debloat_add_system_signature,
         debloat_add_product_signature,
+        mods_signature,
     )
 
     # Reuse an already built artifact for the same build signature unless forced.
@@ -1111,6 +1126,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
                 debloat_disabled_json=debloat_disabled_json,
                 debloat_add_system_json=debloat_add_system_json,
                 debloat_add_product_json=debloat_add_product_json,
+                mods_disabled_json=mods_disabled_json,
                 started_at=now,
                 finished_at=now,
             )
@@ -1136,6 +1152,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         debloat_disabled_json=debloat_disabled_json,
         debloat_add_system_json=debloat_add_system_json,
         debloat_add_product_json=debloat_add_product_json,
+        mods_disabled_json=mods_disabled_json,
     )
     db.add(job)
     db.commit()
@@ -1275,6 +1292,13 @@ async def stream_repo_progress_ws(websocket: WebSocket):
 async def get_debloat_options():
     root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
     entries = await asyncio.to_thread(parse_unica_debloat_entries, root)
+    return {"entries": entries}
+
+
+@app.get(f"{settings.api_prefix}/mods/options")
+async def get_mods_options():
+    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+    entries = await asyncio.to_thread(parse_unica_mod_entries, root)
     return {"entries": entries}
 
 
