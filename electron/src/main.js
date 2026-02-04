@@ -447,13 +447,36 @@ function formatBytes(bytes) {
 
 function loadSeedManifest() {
   const found = MANIFEST_CANDIDATES.find((p) => existsSync(p))
-  if (!found) return { images: [] }
+  if (!found) return { images: buildDefaultManifestImages() }
   try {
     const data = JSON.parse(readFileSync(found, 'utf8'))
-    return { images: Array.isArray(data.images) ? data.images : [] }
+    const images = Array.isArray(data.images) ? data.images : []
+    return { images: images.length ? images : buildDefaultManifestImages() }
   } catch {
-    return { images: [] }
+    return { images: buildDefaultManifestImages() }
   }
+}
+
+function buildDefaultManifestImages() {
+  // No-seed package still needs registry update checks, so build image list from env/default tags.
+  const owner = String(process.env.GHCR_OWNER || 'wings-n').trim().toLowerCase()
+  return [
+    {
+      local_tag: String(process.env.IMAGE_API || 'unica-wb-api:local').trim(),
+      remote: `ghcr.io/${owner}/unica-wb-api:latest`,
+      remote_latest: `ghcr.io/${owner}/unica-wb-api:latest`
+    },
+    {
+      local_tag: String(process.env.IMAGE_WORKER || 'unica-wb-worker:local').trim(),
+      remote: `ghcr.io/${owner}/unica-wb-worker:latest`,
+      remote_latest: `ghcr.io/${owner}/unica-wb-worker:latest`
+    },
+    {
+      local_tag: String(process.env.IMAGE_FRONTEND || 'unica-wb-frontend:local').trim(),
+      remote: `ghcr.io/${owner}/unica-wb-frontend:latest`,
+      remote_latest: `ghcr.io/${owner}/unica-wb-frontend:latest`
+    }
+  ].filter((x) => x.local_tag)
 }
 
 async function dockerImageExists(tag) {
