@@ -7,6 +7,8 @@ fi
 
 cd /app
 
+rm -f /tmp/arq-builds.pid /tmp/arq-controls.pid
+
 python - <<'PY'
 from app.cleanup import cleanup_stale_build_overrides
 
@@ -38,3 +40,4 @@ while kill -0 "$PID_BUILDS" 2>/dev/null && kill -0 "$PID_CONTROLS" 2>/dev/null; 
 done
 
 term
+exit 1

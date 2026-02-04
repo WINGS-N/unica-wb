@@ -84,7 +84,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "test -f /tmp/arq-builds.pid && test -f /tmp/arq-controls.pid && kill -0 $(cat /tmp/arq-builds.pid) && kill -0 $(cat /tmp/arq-controls.pid)",
+          "test -s /tmp/arq-builds.pid && test -s /tmp/arq-controls.pid && PB=$$(cat /tmp/arq-builds.pid) && PC=$$(cat /tmp/arq-controls.pid) && kill -0 \"$$PB\" && kill -0 \"$$PC\" && grep -aq 'WorkerSettingsBuilds' \"/proc/$$PB/cmdline\" && grep -aq 'WorkerSettingsControls' \"/proc/$$PC/cmdline\"",
         ]
       interval: 20s
       timeout: 5s
