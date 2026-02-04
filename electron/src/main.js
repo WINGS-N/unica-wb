@@ -19,7 +19,7 @@ const COMPOSE_FILES_SOURCE = [
 let composeFiles = [...COMPOSE_FILES_SOURCE]
 let composeEnvFile = join(WB_ROOT, '.env')
 let composeCwd = WB_ROOT
-const COMPOSE_SERVICES = (process.env.ELECTRON_COMPOSE_SERVICES || 'redis unica-wb-api unica-wb-worker unica-wb-frontend')
+const COMPOSE_SERVICES = (process.env.ELECTRON_COMPOSE_SERVICES || 'redis api worker frontend')
   .split(/\s+/)
   .filter(Boolean)
 const MANIFEST_CANDIDATES = [
@@ -975,6 +975,39 @@ function waitHttpOk(url, timeoutMs, onTick) {
   })
 }
 
+async function getComposeServiceHealth(service) {
+  const list = await runDocker([
+    'ps',
+    '-aq',
+    '--filter',
+    `label=com.docker.compose.project=${COMPOSE_PROJECT}`,
+    '--filter',
+    `label=com.docker.compose.service=${service}`
+  ], { timeoutMs: 10000 }).catch(() => ({ stdout: '' }))
+  const id = String(list.stdout || '').split(/\s+/).map((s) => s.trim()).find(Boolean)
+  if (!id) return 'missing'
+  const out = await runDocker([
+    'inspect',
+    '--format',
+    '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}',
+    id
+  ], { timeoutMs: 10000 }).catch(() => ({ stdout: '' }))
+  return String(out.stdout || '').trim().toLowerCase() || 'unknown'
+}
+
+async function waitServiceHealthy(service, timeoutMs, onTick) {
+  const started = Date.now()
+  while (true) {
+    const elapsed = Date.now() - started
+    if (onTick) onTick(elapsed, timeoutMs)
+    const status = await getComposeServiceHealth(service)
+    if (status === 'healthy' || status === 'running') return status
+    if (status === 'unhealthy') throw new Error(`Service ${service} is unhealthy`)
+    if (elapsed > timeoutMs) throw new Error(`Timed out waiting for ${service} health`)
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+  }
+}
+
 async function waitUntilReady() {
   const apiTimeout = 8 * 60 * 1000
   emitStartupProgress('health', 2, 'Waiting for API health')
@@ -982,10 +1015,16 @@ async function waitUntilReady() {
     const p = Math.min(65, Math.max(2, Math.round((elapsed / total) * 65)))
     emitStartupProgress('health', p, 'Waiting for API health')
   })
+  const workerTimeout = 5 * 60 * 1000
+  emitStartupProgress('health', 68, 'Waiting for worker health')
+  await waitServiceHealthy('worker', workerTimeout, (elapsed, total) => {
+    const p = Math.min(80, Math.max(68, 68 + Math.round((elapsed / total) * 12)))
+    emitStartupProgress('health', p, 'Waiting for worker health')
+  })
   const feTimeout = 3 * 60 * 1000
-  emitStartupProgress('health', 70, 'Waiting for frontend')
+  emitStartupProgress('health', 82, 'Waiting for frontend')
   await waitHttpOk(FRONTEND_URL, feTimeout, (elapsed, total) => {
-    const p = Math.min(95, Math.max(70, 70 + Math.round((elapsed / total) * 25)))
+    const p = Math.min(95, Math.max(82, 82 + Math.round((elapsed / total) * 13)))
     emitStartupProgress('health', p, 'Waiting for frontend')
   })
   emitStartupProgress('health', 100, 'Services are ready')
