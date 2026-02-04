@@ -11,6 +11,8 @@ defineProps({
   selectedJob: { type: Object, default: null },
   jobTitle: { type: Function, required: true },
   parseJobMods: { type: Function, required: true },
+  parseJobModsDisabled: { type: Function, required: true },
+  hasJobModsConfig: { type: Function, required: true },
   parseJobDebloatDisabled: { type: Function, required: true },
   parseJobDebloatAddSystem: { type: Function, required: true },
   parseJobDebloatAddProduct: { type: Function, required: true },
@@ -22,6 +24,7 @@ const emit = defineEmits([
   'select-job',
   'open-stop',
   'open-mods',
+  'load-mods',
   'load-debloat',
   'update:filterBuildOnly',
   'update:filterSucceededOnly',
@@ -79,12 +82,14 @@ const emit = defineEmits([
             </span>
             <button v-if="job.status === 'running' || job.status === 'queued'" class="rounded-md border border-red-400/60 bg-red-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-red-300 hover:bg-red-500/30" @click.stop="$emit('open-stop', job, $event)">{{ t('stop') }}</button>
             <button v-if="parseJobMods(job).length" class="rounded-md border border-cyan-400/60 bg-cyan-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-cyan-300 hover:bg-cyan-500/30" @click.stop="$emit('open-mods', job, $event)">{{ t('mods') }}</button>
+            <button v-if="hasJobModsConfig(job)" class="rounded-md border border-sky-400/60 bg-sky-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-sky-300 hover:bg-sky-500/30" @click.stop="$emit('load-mods', job, $event)">{{ t('useModlist') }}</button>
             <button v-if="hasJobDebloatChanges(job)" class="rounded-md border border-amber-400/60 bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-300 hover:bg-amber-500/30" @click.stop="$emit('load-debloat', job, $event)">{{ t('loadDebloat') }}</button>
             <a v-if="job.artifact_path" :href="jobArtifactUrl(job)" class="rounded-md border border-emerald-400/60 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-300 hover:bg-emerald-500/30" @click.stop>{{ t('downloadZip') }}</a>
           </div>
         </div>
         <div class="mt-1 text-xs text-slate-400">{{ job.id }}</div>
         <div v-if="parseJobMods(job).length" class="mt-2 text-[11px] text-cyan-300">Extra mods ({{ parseJobMods(job).length }}): {{ parseJobMods(job).map((m) => m.name || m.module_dir).join(', ') }}</div>
+        <div v-if="hasJobModsConfig(job)" class="mt-1 text-[11px] text-sky-300">{{ t('modsDisabledShort') }}: {{ parseJobModsDisabled(job).length }} {{ t('entries') }}</div>
         <div v-if="parseJobDebloatDisabled(job).length" class="mt-1 text-[11px] text-amber-300">{{ t('debloatDisabledShort') }}: {{ parseJobDebloatDisabled(job).length }} {{ t('entries') }}</div>
         <div v-if="parseJobDebloatAddSystem(job).length || parseJobDebloatAddProduct(job).length" class="mt-1 text-[11px] text-amber-200">+{{ parseJobDebloatAddSystem(job).length + parseJobDebloatAddProduct(job).length }} {{ t('customDebloatPaths') }}</div>
       </button>

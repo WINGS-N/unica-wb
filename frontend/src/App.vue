@@ -11,6 +11,7 @@ import UploadModsModal from './components/UploadModsModal.vue'
 import SamsungFwModal from './components/SamsungFwModal.vue'
 import CommitModal from './components/CommitModal.vue'
 import DebloatModal from './components/DebloatModal.vue'
+import ModsModal from './components/ModsModal.vue'
 import BuildQueuePanel from './components/BuildQueuePanel.vue'
 
 // App держит общее состояние, сеть и WS, а UI раскладывается по компонентам
@@ -56,6 +57,11 @@ const debloatDisabledIds = ref([])
 const debloatAddSystemText = ref('')
 const debloatAddProductText = ref('')
 const debloatLoading = ref(false)
+const modsModalOpen = ref(false)
+const modsEntries = ref([])
+const modsDisabledIds = ref([])
+const modsLoading = ref(false)
+const modsTouched = ref(false)
 const uploadModalOpen = ref(false)
 const uploadFile = ref(null)
 const uploadBusy = ref(false)
@@ -198,6 +204,20 @@ function parseJobMods(job) {
   }
 }
 
+function parseJobModsDisabled(job) {
+  if (job?.mods_disabled_json == null) return []
+  try {
+    const arr = JSON.parse(job.mods_disabled_json)
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+
+function hasJobModsConfig(job) {
+  return job?.mods_disabled_json != null
+}
+
 function parseJobDebloatDisabled(job) {
   if (!job?.debloat_disabled_json) return []
   try {
@@ -256,6 +276,16 @@ function loadDebloatFromJob(job, event) {
   debloatAddSystemText.value = listToPathsText(addSystem)
   debloatAddProductText.value = listToPathsText(addProduct)
   debloatModalOpen.value = true
+}
+
+async function loadModsFromJob(job, event) {
+  if (event) event.stopPropagation()
+  if (!modsEntries.value.length) {
+    await loadModsEntries()
+  }
+  modsDisabledIds.value = Array.from(new Set(parseJobModsDisabled(job)))
+  modsTouched.value = true
+  modsModalOpen.value = true
 }
 
 function debloatAddedCount() {
@@ -480,6 +510,7 @@ async function submitJob() {
         version_patch: Number(versionPatch.value),
         version_suffix: versionSuffix.value || null,
         extra_mods_upload_id: uploadedModsId.value || null,
+        mods_disabled: modsTouched.value ? modsDisabledIds.value : null,
         debloat_disabled: debloatDisabledIds.value,
         debloat_add_system: pathsTextToList(debloatAddSystemText.value),
         debloat_add_product: pathsTextToList(debloatAddProductText.value),
@@ -542,6 +573,24 @@ async function loadDebloatEntries() {
     pushToast(`${t('failedDebloatLoad')}: ${e.message}`, 'error')
   } finally {
     debloatLoading.value = false
+  }
+}
+
+async function loadModsEntries() {
+  modsLoading.value = true
+  try {
+    const r = await fetch(`${API_BASE}${API_PREFIX}/mods/options`)
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    const entries = Array.isArray(data.entries) ? data.entries : []
+    modsEntries.value = entries
+    if (!modsTouched.value) {
+      modsDisabledIds.value = entries.filter((x) => Boolean(x.default_disabled)).map((x) => x.id)
+    }
+  } catch (e) {
+    pushToast(`${t('failedModsLoad')}: ${e.message}`, 'error')
+  } finally {
+    modsLoading.value = false
   }
 }
 
@@ -684,6 +733,26 @@ function toggleDebloat(id) {
     debloatDisabledIds.value = debloatDisabledIds.value.filter((x) => x !== id)
   } else {
     debloatDisabledIds.value = [...debloatDisabledIds.value, id]
+  }
+}
+
+async function openModsModal() {
+  if (!modsEntries.value.length) {
+    await loadModsEntries()
+  }
+  modsModalOpen.value = true
+}
+
+function closeModsModal() {
+  modsModalOpen.value = false
+}
+
+function toggleMod(id) {
+  modsTouched.value = true
+  if (modsDisabledIds.value.includes(id)) {
+    modsDisabledIds.value = modsDisabledIds.value.filter((x) => x !== id)
+  } else {
+    modsDisabledIds.value = [...modsDisabledIds.value, id]
   }
 }
 
@@ -1052,6 +1121,7 @@ onMounted(async () => {
     followLogs.value = false
   }
   await fetchDefaults()
+  await loadModsEntries()
   await fetchJobs()
   connectFirmwareProgressWs()
   connectRepoProgressWs()
@@ -1119,12 +1189,14 @@ onUnmounted(() => {
           v-model:force="force"
           v-model:no-rom-zip="noRomZip"
           :loading="loading"
+          :mods-disabled-count="modsDisabledIds.length"
           :debloat-disabled-count="debloatDisabledIds.length"
           :uploaded-mods-id="uploadedModsId"
           :uploaded-mods-count="uploadedMods.length"
           @target-change="fetchDefaults"
           @submit="submitJob"
           @open-upload="openUploadModal"
+          @open-mods="openModsModal"
           @open-debloat="openDebloatModal"
           @open-latest="openLatestArtifactForTarget"
           @clear-uploaded-mods="clearUploadedMods"
@@ -1143,6 +1215,8 @@ onUnmounted(() => {
         :selected-job="selectedJob"
         :job-title="jobTitle"
         :parse-job-mods="parseJobMods"
+        :parse-job-mods-disabled="parseJobModsDisabled"
+        :has-job-mods-config="hasJobModsConfig"
         :parse-job-debloat-disabled="parseJobDebloatDisabled"
         :parse-job-debloat-add-system="parseJobDebloatAddSystem"
         :parse-job-debloat-add-product="parseJobDebloatAddProduct"
@@ -1151,6 +1225,7 @@ onUnmounted(() => {
         @select-job="selectJob"
         @open-stop="openStopModal"
         @open-mods="openJobModsModal"
+        @load-mods="loadModsFromJob"
         @load-debloat="loadDebloatFromJob"
         @update:filter-build-only="jobsFilterBuildOnly = $event"
         @update:filter-succeeded-only="jobsFilterSucceededOnly = $event"
@@ -1250,6 +1325,15 @@ onUnmounted(() => {
       v-model:debloat-add-product-text="debloatAddProductText"
       @close="closeDebloatModal"
       @toggle="toggleDebloat"
+    />
+    <ModsModal
+      :open="modsModalOpen"
+      :t="t"
+      :mods-loading="modsLoading"
+      :mods-entries="modsEntries"
+      :mods-disabled-ids="modsDisabledIds"
+      @close="closeModsModal"
+      @toggle="toggleMod"
     />
   </div>
 </template>

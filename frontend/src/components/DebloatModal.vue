@@ -39,14 +39,17 @@ function isEnabled(id) {
           <div
             v-for="entry in debloatEntries"
             :key="entry.id"
-            class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border border-slate-700 bg-slate-800/70 p-3 transition hover:bg-slate-700/70"
+            class="flex cursor-pointer items-start justify-between gap-3 rounded-lg border p-3 transition"
+            :class="isEnabled(entry.id)
+              ? 'border-slate-700 bg-slate-800/70 hover:bg-slate-700/70'
+              : 'border-red-600/50 bg-red-900/10 hover:bg-red-900/20'"
             @click="$emit('toggle', entry.id)"
           >
             <div>
               <div class="text-sm font-semibold text-slate-100">{{ entry.path }}</div>
               <div class="mt-1 text-xs text-slate-400">{{ entry.partition }} • {{ entry.section }}</div>
             </div>
-            <button type="button" class="rounded-md px-2 py-1 text-xs font-semibold uppercase" :class="isEnabled(entry.id) ? 'bg-emerald-600/30 text-emerald-300' : 'bg-slate-700 text-slate-200'">
+            <button type="button" class="rounded-md px-2 py-1 text-xs font-semibold uppercase" :class="isEnabled(entry.id) ? 'bg-emerald-600/30 text-emerald-300' : 'bg-red-600/30 text-red-200'">
               {{ isEnabled(entry.id) ? t('enabled') : t('disabled') }}
             </button>
           </div>

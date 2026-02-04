@@ -15,6 +15,7 @@ defineProps({
   force: { type: Boolean, required: true },
   noRomZip: { type: Boolean, required: true },
   loading: { type: Boolean, required: true },
+  modsDisabledCount: { type: Number, required: true },
   debloatDisabledCount: { type: Number, required: true },
   uploadedModsId: { type: String, required: true },
   uploadedModsCount: { type: Number, required: true }
@@ -33,6 +34,7 @@ const emit = defineEmits([
   'update:noRomZip',
   'submit',
   'open-upload',
+  'open-mods',
   'open-debloat',
   'open-latest',
   'clear-uploaded-mods'
@@ -134,10 +136,16 @@ function onTargetChange(value) {
     <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-upload')">
       {{ t('uploadMods') }}
     </button>
+    <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-mods')">
+      {{ t('modsList') }}
+    </button>
     <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-debloat')">
       {{ t('debloatList') }}
     </button>
 
+    <div v-if="modsDisabledCount" class="mt-2 rounded-xl border border-sky-700/60 bg-sky-900/20 p-3 text-xs text-sky-200">
+      {{ t('modsDisabledForBuild') }}: {{ modsDisabledCount }} {{ t('entries') }}
+    </div>
     <div v-if="debloatDisabledCount" class="mt-2 rounded-xl border border-amber-700/60 bg-amber-900/20 p-3 text-xs text-amber-200">
       {{ t('debloatDisabledForBuild') }}: {{ debloatDisabledCount }} {{ t('entries') }}
     </div>
