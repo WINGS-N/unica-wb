@@ -1,8 +1,12 @@
 import asyncio
+import base64
 import concurrent.futures
+import os
 import hashlib
+import hmac
 import json
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -24,6 +28,7 @@ from .config import settings
 from .cleanup import cleanup_stale_build_overrides
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
+from .error_hints import detect_build_hints
 from .mods_utils import parse_unica_mod_entries
 from .firmware_progress import PROGRESS_CHANNEL, clear_progress, list_progress
 from .mods_archive import (
@@ -40,6 +45,11 @@ from .repo_progress import PROGRESS_CHANNEL as REPO_PROGRESS_CHANNEL
 from .repo_progress import clear_progress as clear_repo_progress
 from .repo_progress import get_progress as get_repo_progress
 from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest
+from .build_progress import (
+    PROGRESS_CHANNEL as BUILD_PROGRESS_CHANNEL,
+    list_progress as list_build_progress,
+    remove_progress as remove_build_progress,
+)
 
 app = FastAPI(title=settings.app_name)
 
@@ -57,6 +67,25 @@ _GIT_SNAPSHOT_TTL_SEC = 30.0
 _GIT_SNAPSHOT_KEY = "un1ca:cache:git_snapshot:v1"
 _HTTP_METRICS_PREFIX = "un1ca:metrics:http:"
 _HTTP_LAT_BUCKETS_MS = [10, 25, 50, 100, 200, 350, 500, 750, 1000, 2000, 5000]
+
+
+@app.middleware("http")
+async def auth_middleware(request: Request, call_next):
+    path = request.url.path
+    if path.endswith("/healthz") or path.endswith("/readyz"):
+        return await call_next(request)
+    if path.startswith(f"{settings.api_prefix}/auth/"):
+        return await call_next(request)
+    db = SessionLocal()
+    try:
+        if not _auth_enabled(db):
+            return await call_next(request)
+        token = _get_token_from_request(request)
+        if not token or not _verify_token(_get_auth_secret(db), token):
+            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
+    finally:
+        db.close()
+    return await call_next(request)
 
 
 def _redis_get_json(key: str) -> dict:
@@ -259,6 +288,97 @@ def _set_setting(db: Session, key: str, value: str):
     db.commit()
 
 
+def _delete_setting(db: Session, key: str):
+    row = db.get(AppSetting, key)
+    if row:
+        db.delete(row)
+        db.commit()
+
+
+def _delete_setting(db: Session, key: str):
+    row = db.get(AppSetting, key)
+    if row:
+        db.delete(row)
+        db.commit()
+
+
+_AUTH_TOKEN_TTL_SEC = 7 * 24 * 3600
+
+
+def _b64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _b64url_decode(text: str) -> bytes:
+    padded = text + "=" * (-len(text) % 4)
+    return base64.urlsafe_b64decode(padded.encode("utf-8"))
+
+
+def _hash_password(password: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
+    return digest.hex()
+
+
+def _get_auth_secret(db: Session) -> str:
+    return _get_setting(db, "auth.hash", "")
+
+
+def _get_auth_salt(db: Session) -> str:
+    return _get_setting(db, "auth.salt", "")
+
+
+def _auth_enabled(db: Session) -> bool:
+    return bool(_get_auth_secret(db) and _get_auth_salt(db))
+
+
+def _make_token(secret_hex: str) -> str:
+    payload = {"ts": int(time.time()), "nonce": secrets.token_hex(8)}
+    raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
+    sig = hmac.new(bytes.fromhex(secret_hex), raw, hashlib.sha256).digest()
+    return f"{_b64url_encode(raw)}.{_b64url_encode(sig)}"
+
+
+def _verify_token(secret_hex: str, token: str) -> bool:
+    try:
+        payload_b64, sig_b64 = token.split(".", 1)
+        raw = _b64url_decode(payload_b64)
+        expected = hmac.new(bytes.fromhex(secret_hex), raw, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, _b64url_decode(sig_b64)):
+            return False
+        payload = json.loads(raw.decode("utf-8"))
+        ts = int(payload.get("ts", 0))
+        return (time.time() - ts) <= _AUTH_TOKEN_TTL_SEC
+    except Exception:
+        return False
+
+
+def _get_token_from_request(request: Request) -> str:
+    auth = request.headers.get("authorization") or request.headers.get("Authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip()
+    return request.query_params.get("token", "").strip()
+
+
+def _safe_git_url(url: str) -> str:
+    if "@" not in url:
+        return url
+    if url.startswith("https://"):
+        return "https://" + url.split("@", 1)[1]
+    if url.startswith("http://"):
+        return "http://" + url.split("@", 1)[1]
+    return url
+
+
+def _git_url_with_auth(url: str, username: str, token: str) -> str:
+    if not url.startswith("http"):
+        return url
+    if not token:
+        return url
+    user = username or "oauth2"
+    return re.sub(r"^https?://", lambda m: f"{m.group(0)}{user}:{token}@", url, count=1)
+
+
 def _repo_root() -> Path:
     base = Path(settings.un1ca_root)
     nested = base / "UN1CA"
@@ -282,6 +402,22 @@ def _parse_model_csc(firmware_value: str) -> tuple[str, str]:
     if len(parts) < 2:
         return "", ""
     return parts[0].strip(), parts[1].strip()
+
+
+def _require_ws_auth(websocket: WebSocket):
+    db = SessionLocal()
+    try:
+        if not _auth_enabled(db):
+            return True
+        token = websocket.query_params.get("token", "")
+        auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization") or ""
+        if not token and auth.lower().startswith("bearer "):
+            token = auth.split(" ", 1)[1].strip()
+        if not token or not _verify_token(_get_auth_secret(db), token):
+            return False
+        return True
+    finally:
+        db.close()
 
 
 def _get_latest_firmware(model: str, csc: str) -> str:
@@ -351,6 +487,32 @@ def _dir_size_bytes(path: Path) -> int:
             pass
     _redis_set_json(redis_key, {"ts": now, "size": total})
     return total
+
+
+def _collect_resources() -> dict:
+    load1, load5, load15 = os.getloadavg()
+    mem_total = 0
+    mem_available = 0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    mem_total = int(line.split()[1]) * 1024
+                elif line.startswith("MemAvailable:"):
+                    mem_available = int(line.split()[1]) * 1024
+    except Exception:
+        pass
+    mem_used = max(0, mem_total - mem_available)
+    out_usage = shutil.disk_usage(settings.out_dir) if Path(settings.out_dir).exists() else shutil.disk_usage("/")
+    data_usage = shutil.disk_usage(settings.data_dir) if Path(settings.data_dir).exists() else shutil.disk_usage("/")
+    return {
+        "load": {"1m": load1, "5m": load5, "15m": load15},
+        "memory": {"total": mem_total, "used": mem_used, "available": mem_available},
+        "disk": {
+            "out": {"total": out_usage.total, "used": out_usage.used, "free": out_usage.free},
+            "data": {"total": data_usage.total, "used": data_usage.used, "free": data_usage.free},
+        },
+    }
 
 
 def _collect_samsung_fw() -> dict[str, list[dict[str, str | int | bool]]]:
@@ -727,6 +889,8 @@ def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
     repo_root = _repo_root()
     git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
+    git_username = _get_setting(db, "repo.git_username", "")
+    git_token = _get_setting(db, "repo.git_token", "")
     snapshot = _git_snapshot_cached()
     commit_details = snapshot.get("commit", {})
     repo_sync = snapshot.get("repo_sync", {})
@@ -736,6 +900,8 @@ def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
         "repo_path": str(repo_root),
         "repo_exists": _repo_exists(),
         "repo_size_bytes": _repo_size_bytes(),
+        "git_username": git_username,
+        "git_token_set": bool(git_token),
         "commit": commit_details,
         "repo_sync": repo_sync,
         "progress": get_repo_progress(),
@@ -927,10 +1093,60 @@ def _get_latest_artifact_path_for_target_with_new_session(target: str) -> Path:
         db.close()
 
 
-def _update_repo_config_with_new_session(git_url: str) -> dict[str, str | int | bool | dict]:
+def _list_artifacts_with_new_session(target: str | None = None, limit: int = 50) -> list[dict]:
+    db = SessionLocal()
+    try:
+        q = (
+            db.query(BuildJob)
+            .filter(
+                BuildJob.artifact_path.isnot(None),
+                BuildJob.status.in_(("succeeded", "reused")),
+            )
+            .order_by(desc(BuildJob.finished_at), desc(BuildJob.created_at))
+        )
+        if target:
+            q = q.filter(BuildJob.target == target)
+        rows = q.limit(max(1, min(limit, 200))).all()
+        items = []
+        for job in rows:
+            size = 0
+            if job.artifact_path and Path(job.artifact_path).exists():
+                size = Path(job.artifact_path).stat().st_size
+            items.append(
+                {
+                    "job_id": job.id,
+                    "target": job.target,
+                    "artifact_path": job.artifact_path,
+                    "size_bytes": size,
+                    "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+                    "source_commit": job.source_commit,
+                    "version_major": job.version_major,
+                    "version_minor": job.version_minor,
+                    "version_patch": job.version_patch,
+                    "version_suffix": job.version_suffix,
+                    "reused_from_job_id": job.reused_from_job_id,
+                }
+            )
+        return items
+    finally:
+        db.close()
+
+
+def _update_repo_config_with_new_session(
+    git_url: str,
+    git_username: str | None = None,
+    git_token: str | None = None,
+) -> dict[str, str | int | bool | dict]:
     db = SessionLocal()
     try:
         _set_setting(db, "repo.git_url", git_url)
+        if git_username is not None:
+            _set_setting(db, "repo.git_username", git_username.strip())
+        if git_token is not None:
+            if git_token.strip():
+                _set_setting(db, "repo.git_token", git_token.strip())
+            else:
+                _delete_setting(db, "repo.git_token")
         _invalidate_repo_caches()
         return _repo_info(db)
     finally:
@@ -962,6 +1178,43 @@ async def readyz():
         return await asyncio.to_thread(_readyz_impl)
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=503, content={"status": "down", "reason": str(exc)})
+
+
+@app.get(f"{settings.api_prefix}/auth/status")
+async def auth_status(db: Session = Depends(get_db)):
+    return {"enabled": _auth_enabled(db)}
+
+
+@app.post(f"{settings.api_prefix}/auth/login")
+async def auth_login(payload: dict, db: Session = Depends(get_db)):
+    password = str(payload.get("password") or "")
+    if not password:
+        raise HTTPException(400, "Password required")
+    if not _auth_enabled(db):
+        raise HTTPException(400, "Auth is not enabled yet")
+    salt = _get_auth_salt(db)
+    secret = _get_auth_secret(db)
+    if _hash_password(password, salt) != secret:
+        raise HTTPException(401, "Invalid password")
+    return {"token": _make_token(secret)}
+
+
+@app.post(f"{settings.api_prefix}/auth/password")
+async def auth_set_password(payload: dict, request: Request, db: Session = Depends(get_db)):
+    password = str(payload.get("password") or "")
+    if _auth_enabled(db):
+        token = _get_token_from_request(request)
+        if not token or not _verify_token(_get_auth_secret(db), token):
+            raise HTTPException(401, "Unauthorized")
+    if not password:
+        _delete_setting(db, "auth.hash")
+        _delete_setting(db, "auth.salt")
+        return {"enabled": False}
+    salt = secrets.token_hex(16)
+    hashed = _hash_password(password, salt)
+    _set_setting(db, "auth.salt", salt)
+    _set_setting(db, "auth.hash", hashed)
+    return {"enabled": True, "token": _make_token(hashed)}
 
 
 @app.get(f"{settings.api_prefix}/debug/perf")
@@ -1003,6 +1256,11 @@ async def debug_perf():
             "endpoints": http_metrics,
         },
     }
+
+
+@app.get(f"{settings.api_prefix}/system/resources")
+async def system_resources():
+    return await asyncio.to_thread(_collect_resources)
 
 
 @app.get(f"{settings.api_prefix}/debug/perf/top")
@@ -1212,16 +1470,24 @@ async def update_repo_config(payload: RepoConfigUpdate):
     value = (payload.git_url or "").strip()
     if not re.match(r"^(https://|git@|ssh://).+", value):
         raise HTTPException(400, "Invalid git url")
-    return await asyncio.to_thread(_update_repo_config_with_new_session, value)
+    return await asyncio.to_thread(
+        _update_repo_config_with_new_session,
+        value,
+        payload.git_username,
+        payload.git_token,
+    )
 
 
 @app.post(f"{settings.api_prefix}/repo/clone", response_model=BuildJobRead)
 async def repo_clone(db: Session = Depends(get_db)):
     git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
-    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo clone: {git_url}")
+    git_username = _get_setting(db, "repo.git_username", "")
+    git_token = _get_setting(db, "repo.git_token", "")
+    auth_url = _git_url_with_auth(git_url, git_username, git_token)
+    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo clone: {_safe_git_url(git_url)}")
     _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, git_url, git_ref)
+    op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, auth_url, git_ref, git_username, git_token)
     db.commit()
     db.refresh(op_job)
     return op_job
@@ -1230,9 +1496,12 @@ async def repo_clone(db: Session = Depends(get_db)):
 @app.post(f"{settings.api_prefix}/repo/pull", response_model=BuildJobRead)
 async def repo_pull(db: Session = Depends(get_db)):
     git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
+    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
+    git_username = _get_setting(db, "repo.git_username", "")
+    git_token = _get_setting(db, "repo.git_token", "")
     op_job = _create_operation_job(db, target="repo", operation_name=f"Repo pull: {git_ref}")
     _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_pull_job_task", op_job.id, git_ref)
+    op_job.queue_job_id = await _enqueue_build("repo_pull_job_task", op_job.id, git_ref, git_url, git_username, git_token)
     db.commit()
     db.refresh(op_job)
     return op_job
@@ -1240,9 +1509,12 @@ async def repo_pull(db: Session = Depends(get_db)):
 
 @app.post(f"{settings.api_prefix}/repo/submodules", response_model=BuildJobRead)
 async def repo_submodules(db: Session = Depends(get_db)):
+    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
+    git_username = _get_setting(db, "repo.git_username", "")
+    git_token = _get_setting(db, "repo.git_token", "")
     op_job = _create_operation_job(db, target="repo", operation_name="Repo submodules update")
     _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_submodules_job_task", op_job.id)
+    op_job.queue_job_id = await _enqueue_build("repo_submodules_job_task", op_job.id, git_url, git_username, git_token)
     db.commit()
     db.refresh(op_job)
     return op_job
@@ -1264,6 +1536,9 @@ async def repo_delete(mode: str = "repo_only", db: Session = Depends(get_db)):
 @app.websocket(f"{settings.api_prefix}/repo/progress/ws")
 async def stream_repo_progress_ws(websocket: WebSocket):
     await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
     pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
     try:
         snapshot = await asyncio.to_thread(get_repo_progress)
@@ -1321,6 +1596,9 @@ async def get_samsung_fw():
 @app.websocket(f"{settings.api_prefix}/firmware/progress/ws")
 async def stream_firmware_progress_ws(websocket: WebSocket):
     await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
     pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
     try:
         progress = await asyncio.to_thread(list_progress)
@@ -1334,6 +1612,36 @@ async def stream_firmware_progress_ws(websocket: WebSocket):
                     payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
                 except Exception:
                     payload = {"type": "error", "message": "bad firmware progress payload"}
+                await websocket.send_json(payload)
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        try:
+            await asyncio.to_thread(pubsub.close)
+        except Exception:
+            pass
+
+
+@app.websocket(f"{settings.api_prefix}/build/progress/ws")
+async def stream_build_progress_ws(websocket: WebSocket):
+    await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    try:
+        progress = await asyncio.to_thread(list_build_progress)
+        await websocket.send_json({"type": "snapshot", "items": list(progress.values())})
+        await asyncio.to_thread(pubsub.subscribe, BUILD_PROGRESS_CHANNEL)
+        while True:
+            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+            if message and message.get("type") == "message":
+                data = message.get("data")
+                try:
+                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
+                except Exception:
+                    payload = {"type": "error", "message": "bad build progress payload"}
                 await websocket.send_json(payload)
             await asyncio.sleep(0.1)
     except WebSocketDisconnect:
@@ -1464,6 +1772,12 @@ async def download_latest_artifact_for_target(target: str):
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
 
 
+@app.get(f"{settings.api_prefix}/artifacts/history")
+async def artifacts_history(target: str | None = None, limit: int = 50):
+    items = await asyncio.to_thread(_list_artifacts_with_new_session, target, limit)
+    return {"items": items}
+
+
 @app.post(f"{settings.api_prefix}/jobs/{{job_id}}/stop", response_model=BuildJobRead)
 async def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = Depends(get_db)):
     # Stop running job идет в control queue, потому что signal должен отправлять worker (same PID namespace).
@@ -1490,6 +1804,17 @@ async def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Sessi
     db.commit()
     db.refresh(job)
     return job
+
+
+@app.get(f"{settings.api_prefix}/jobs/{{job_id}}/hints")
+async def job_hints(job_id: str):
+    job = await asyncio.to_thread(_get_job_with_new_session, job_id)
+    if not job or not job.log_path:
+        raise HTTPException(404, "Log file not found")
+    log_path = Path(job.log_path)
+    text = await asyncio.to_thread(_read_log_tail_text, log_path, 512)
+    hints = detect_build_hints(text)
+    return {"hints": hints}
 
 
 def _get_job_log_snapshot(job_id: str) -> dict[str, str]:
@@ -1529,9 +1854,20 @@ def _tail_log_start_pos(path: Path, tail_kb: int) -> int:
         return f.tell()
 
 
+def _read_log_tail_text(path: Path, tail_kb: int = 256) -> str:
+    if not path.exists():
+        return ""
+    pos = _tail_log_start_pos(path, tail_kb)
+    text, _ = _read_log_chunk(path, pos)
+    return text
+
+
 @app.websocket(f"{settings.api_prefix}/jobs/{{job_id}}/ws")
 async def stream_logs_ws(websocket: WebSocket, job_id: str, tail_kb: int = 256):
     await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
     try:
         snap = await asyncio.to_thread(_get_job_log_snapshot, job_id)
         if snap.get("exists") != "1":

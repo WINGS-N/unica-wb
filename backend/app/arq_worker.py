@@ -46,16 +46,16 @@ async def delete_fw_job_task(_ctx, job_id: str, fw_type: str, fw_key: str):
     await asyncio.to_thread(run_delete_samsung_fw_job, job_id, fw_type, fw_key)
 
 
-async def repo_clone_job_task(_ctx, job_id: str, git_url: str, git_ref: str):
-    await asyncio.to_thread(run_repo_clone_job, job_id, git_url, git_ref)
+async def repo_clone_job_task(_ctx, job_id: str, git_url: str, git_ref: str, git_username: str, git_token: str):
+    await asyncio.to_thread(run_repo_clone_job, job_id, git_url, git_ref, git_username, git_token)
 
 
-async def repo_pull_job_task(_ctx, job_id: str, git_ref: str):
-    await asyncio.to_thread(run_repo_pull_job, job_id, git_ref)
+async def repo_pull_job_task(_ctx, job_id: str, git_ref: str, git_url: str, git_username: str, git_token: str):
+    await asyncio.to_thread(run_repo_pull_job, job_id, git_ref, git_url, git_username, git_token)
 
 
-async def repo_submodules_job_task(_ctx, job_id: str):
-    await asyncio.to_thread(run_repo_submodules_job, job_id)
+async def repo_submodules_job_task(_ctx, job_id: str, git_url: str, git_username: str, git_token: str):
+    await asyncio.to_thread(run_repo_submodules_job, job_id, git_url, git_username, git_token)
 
 
 async def repo_delete_job_task(_ctx, job_id: str, mode: str):

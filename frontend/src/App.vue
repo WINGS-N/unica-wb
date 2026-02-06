@@ -12,6 +12,10 @@ import SamsungFwModal from './components/SamsungFwModal.vue'
 import CommitModal from './components/CommitModal.vue'
 import DebloatModal from './components/DebloatModal.vue'
 import ModsModal from './components/ModsModal.vue'
+import SettingsModal from './components/SettingsModal.vue'
+import BuildHintsModal from './components/BuildHintsModal.vue'
+import ArtifactsModal from './components/ArtifactsModal.vue'
+import UnauthorizedModal from './components/UnauthorizedModal.vue'
 import BuildQueuePanel from './components/BuildQueuePanel.vue'
 
 // App держит общее состояние, сеть и WS, а UI раскладывается по компонентам
@@ -22,6 +26,7 @@ const STORAGE_SELECTED_JOB = 'un1ca:selectedJobId'
 const STORAGE_LOG_TAIL_KB = 'un1ca:logTailKb'
 const STORAGE_FOLLOW_LOGS = 'un1ca:followLogs'
 const STORAGE_LANGUAGE = 'un1ca:lang'
+const STORAGE_AUTH_TOKEN = 'un1ca:authToken'
 
 const target = ref('')
 const targetOptions = ref([])
@@ -120,6 +125,10 @@ const samsungFwItems = ref([])
 const firmwareDeleteBusyKey = ref('')
 const firmwareExtractBusyKey = ref('')
 const firmwareProgress = ref({})
+const buildProgress = ref({})
+let buildProgressWs = null
+let buildProgressReconnect = null
+let buildProgressShouldReconnect = true
 const activeLogJobId = ref('')
 const toasts = ref([])
 let toastSeq = 0
@@ -134,6 +143,24 @@ let repoUrlSaveTimer = null
 let timer = null
 const buildQueueHost = ref(null)
 const jobsPanelMaxHeight = ref(null)
+const authEnabled = ref(false)
+const authToken = ref(localStorage.getItem(STORAGE_AUTH_TOKEN) || '')
+const settingsModalOpen = ref(false)
+const authBusy = ref(false)
+const authPassword = ref('')
+const authPasswordConfirm = ref('')
+const authLoginPassword = ref('')
+const unauthorizedModalOpen = ref(false)
+const repoUsernameInput = ref('')
+const repoTokenInput = ref('')
+const resources = ref(null)
+const resourcesLoading = ref(false)
+const artifactsModalOpen = ref(false)
+const artifactsLoading = ref(false)
+const artifacts = ref([])
+const buildHintsModalOpen = ref(false)
+const buildHintsLoading = ref(false)
+const buildHints = ref([])
 
 function syncJobsPanelHeight() {
   const el = buildQueueHost.value
@@ -159,6 +186,26 @@ function t(key) {
   return I18N[language.value]?.[key] || I18N.en[key] || key
 }
 
+function authHeaders() {
+  return authToken.value ? { Authorization: `Bearer ${authToken.value}` } : {}
+}
+
+function withAuthToken(url) {
+  if (!authToken.value) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(authToken.value)}`
+}
+
+async function apiFetch(url, options = {}) {
+  const headers = { ...(options.headers || {}), ...authHeaders() }
+  const r = await fetch(url, { ...options, headers })
+  if (r.status === 401) {
+    authEnabled.value = true
+    if (!unauthorizedModalOpen.value) unauthorizedModalOpen.value = true
+  }
+  return r
+}
+
 function pushToast(message, type = 'info', timeoutMs = 4500) {
   // Не блокируем alert, показываем toast и авто-убираем по таймауту
   // No blocking alert, show toast and auto remove by timeout
@@ -169,6 +216,147 @@ function pushToast(message, type = 'info', timeoutMs = 4500) {
       toasts.value = toasts.value.filter((x) => x.id !== id)
     }, timeoutMs)
   }
+}
+
+async function fetchAuthStatus() {
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/auth/status`)
+    if (!r.ok) return
+    const data = await r.json()
+    authEnabled.value = Boolean(data.enabled)
+  } catch {}
+}
+
+async function loginWithPassword() {
+  authBusy.value = true
+  try {
+    const r = await fetch(`${API_BASE}${API_PREFIX}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: authLoginPassword.value })
+    })
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    authToken.value = data.token || ''
+    localStorage.setItem(STORAGE_AUTH_TOKEN, authToken.value)
+    authLoginPassword.value = ''
+    unauthorizedModalOpen.value = false
+    await fetchAuthStatus()
+    closeFirmwareProgressWs()
+    closeRepoProgressWs()
+    closeBuildProgressWs()
+    connectFirmwareProgressWs()
+    connectRepoProgressWs()
+    connectBuildProgressWs()
+    if (selectedJob.value?.id) {
+      openLogs(selectedJob.value.id)
+    }
+    await fetchDefaults(target.value || undefined)
+    await fetchJobs()
+    pushToast(t('authLoggedIn'), 'success')
+  } catch (e) {
+    pushToast(`${t('authLoginFailed')}: ${e.message}`, 'error')
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function setPassword() {
+  if (!authPassword.value) return
+  if (authPassword.value !== authPasswordConfirm.value) {
+    pushToast(t('authPasswordMismatch'), 'error')
+    return
+  }
+  authBusy.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: authPassword.value })
+    })
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    authEnabled.value = Boolean(data.enabled)
+    if (data.token) {
+      authToken.value = data.token
+      localStorage.setItem(STORAGE_AUTH_TOKEN, authToken.value)
+    }
+    authPassword.value = ''
+    authPasswordConfirm.value = ''
+    pushToast(t('authPasswordSet'), 'success')
+  } catch (e) {
+    pushToast(`${t('authPasswordSetFailed')}: ${e.message}`, 'error')
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function clearPassword() {
+  authBusy.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/auth/password`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: '' })
+    })
+    if (!r.ok) throw new Error(await r.text())
+    authEnabled.value = false
+    authToken.value = ''
+    localStorage.removeItem(STORAGE_AUTH_TOKEN)
+    pushToast(t('authPasswordCleared'), 'warning')
+  } catch (e) {
+    pushToast(`${t('authPasswordClearFailed')}: ${e.message}`, 'error')
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function saveRepoCredentials() {
+  authBusy.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/repo/config`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        git_url: repoInfo.value.git_url || '',
+        git_username: repoUsernameInput.value || null,
+        git_token: repoTokenInput.value || null
+      })
+    })
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    repoInfo.value = { ...repoInfo.value, ...data }
+    repoTokenInput.value = ''
+    pushToast(t('repoCredsSaved'), 'success')
+  } catch (e) {
+    pushToast(`${t('repoCredsSaveFailed')}: ${e.message}`, 'error')
+  } finally {
+    authBusy.value = false
+  }
+}
+
+async function fetchResources() {
+  resourcesLoading.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/system/resources`)
+    if (!r.ok) throw new Error(await r.text())
+    resources.value = await r.json()
+  } catch (e) {
+    pushToast(`${t('resourcesLoadFailed')}: ${e.message}`, 'error')
+  } finally {
+    resourcesLoading.value = false
+  }
+}
+
+function openSettingsModal() {
+  settingsModalOpen.value = true
+  repoUsernameInput.value = repoInfo.value.git_username || ''
+  repoTokenInput.value = ''
+  fetchResources()
+}
+
+function closeSettingsModal() {
+  settingsModalOpen.value = false
 }
 
 function dismissToast(id) {
@@ -360,14 +548,14 @@ function jobTitle(job) {
 }
 
 function jobArtifactUrl(job) {
-  return `${API_BASE}${API_PREFIX}/jobs/${job.id}/artifact`
+  return withAuthToken(`${API_BASE}${API_PREFIX}/jobs/${job.id}/artifact`)
 }
 
 function latestArtifactForTargetUrl() {
   // URL для кнопки Latest ZIP по выбранному target
   // URL endpoint for Latest ZIP button by selected target
   if (!target.value) return '#'
-  return `${API_BASE}${API_PREFIX}/artifacts/latest/${encodeURIComponent(target.value)}`
+  return withAuthToken(`${API_BASE}${API_PREFIX}/artifacts/latest/${encodeURIComponent(target.value)}`)
 }
 
 function openLatestArtifactForTarget() {
@@ -439,7 +627,7 @@ function formatSpeed(bps) {
 async function fetchJobs() {
   jobsLoading.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/jobs`)
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/jobs`)
     if (!r.ok) return
     jobs.value = await r.json()
     const selectedId = selectedJob.value?.id || localStorage.getItem(STORAGE_SELECTED_JOB)
@@ -466,7 +654,7 @@ async function fetchDefaults(selectedTarget) {
   defaultsLoading.value = true
   try {
     const qs = selectedTarget ? `?target=${encodeURIComponent(selectedTarget)}` : ''
-    const r = await fetch(`${API_BASE}${API_PREFIX}/defaults${qs}`)
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/defaults${qs}`)
     if (!r.ok) return
     const data = await r.json()
     targetOptions.value = data.target_options || []
@@ -498,7 +686,7 @@ async function fetchDefaults(selectedTarget) {
 async function submitJob() {
   loading.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/jobs`, {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/jobs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -565,7 +753,7 @@ function clearUploadedMods() {
 async function loadDebloatEntries() {
   debloatLoading.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/debloat/options`)
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/debloat/options`)
     if (!r.ok) throw new Error(await r.text())
     const data = await r.json()
     debloatEntries.value = data.entries || []
@@ -579,7 +767,7 @@ async function loadDebloatEntries() {
 async function loadModsEntries() {
   modsLoading.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/mods/options`)
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/mods/options`)
     if (!r.ok) throw new Error(await r.text())
     const data = await r.json()
     const entries = Array.isArray(data.entries) ? data.entries : []
@@ -599,7 +787,7 @@ async function fetchSamsungFw() {
   // Separate load samsung fw cache for modal window
   samsungFwLoading.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/firmware/samsung`)
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/firmware/samsung`)
     if (!r.ok) throw new Error(await r.text())
     const data = await r.json()
     samsungFwItems.value = Array.isArray(data.items) ? data.items : []
@@ -619,6 +807,48 @@ function closeSamsungFwModal() {
   samsungFwModalOpen.value = false
 }
 
+async function openArtifactsModal() {
+  artifactsModalOpen.value = true
+  artifactsLoading.value = true
+  try {
+    const qs = target.value ? `?target=${encodeURIComponent(target.value)}` : ''
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/artifacts/history${qs}`)
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    artifacts.value = Array.isArray(data.items) ? data.items : []
+  } catch (e) {
+    pushToast(`${t('artifactsLoadFailed')}: ${e.message}`, 'error')
+  } finally {
+    artifactsLoading.value = false
+  }
+}
+
+function closeArtifactsModal() {
+  artifactsModalOpen.value = false
+}
+
+async function openBuildHintsModal(job, event) {
+  if (event) event.stopPropagation()
+  if (!job?.id) return
+  buildHintsModalOpen.value = true
+  buildHintsLoading.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/jobs/${job.id}/hints`)
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    buildHints.value = Array.isArray(data.hints) ? data.hints : []
+  } catch (e) {
+    pushToast(`${t('hintsLoadFailed')}: ${e.message}`, 'error')
+  } finally {
+    buildHintsLoading.value = false
+  }
+}
+
+function closeBuildHintsModal() {
+  buildHintsModalOpen.value = false
+  buildHints.value = []
+}
+
 function openCommitModal() {
   commitModalOpen.value = true
 }
@@ -630,7 +860,7 @@ function closeCommitModal() {
 async function queueRepoAction(path, method, okToastKey) {
   repoActionBusy.value = true
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}${path}`, { method })
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}${path}`, { method })
     if (!r.ok) throw new Error(await r.text())
     await fetchJobs()
     await fetchDefaults(target.value || undefined)
@@ -663,7 +893,7 @@ function updateRepoUrlInput(value) {
   if (repoUrlSaveTimer) clearTimeout(repoUrlSaveTimer)
   repoUrlSaveTimer = setTimeout(async () => {
     try {
-      const r = await fetch(`${API_BASE}${API_PREFIX}/repo/config`, {
+      const r = await apiFetch(`${API_BASE}${API_PREFIX}/repo/config`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ git_url: value })
@@ -682,7 +912,7 @@ async function deleteSamsungFwEntry(fwType, fwKey) {
   const busy = `${fwType}:${fwKey}`
   firmwareDeleteBusyKey.value = busy
   try {
-    const r = await fetch(
+    const r = await apiFetch(
       `${API_BASE}${API_PREFIX}/firmware/samsung/${fwType}/${encodeURIComponent(fwKey)}?target=${encodeURIComponent(target.value)}`,
       {
       method: 'DELETE'
@@ -702,7 +932,7 @@ async function deleteSamsungFwEntry(fwType, fwKey) {
 async function extractSamsungFwEntry(fwKey) {
   firmwareExtractBusyKey.value = fwKey
   try {
-    const r = await fetch(`${API_BASE}${API_PREFIX}/firmware/samsung/${encodeURIComponent(fwKey)}/extract`, {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/firmware/samsung/${encodeURIComponent(fwKey)}/extract`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ target: target.value })
@@ -779,7 +1009,7 @@ async function uploadModsArchive() {
   try {
     const fd = new FormData()
     fd.append('file', uploadFile.value)
-    const r = await fetch(`${API_BASE}${API_PREFIX}/mods/upload`, {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/mods/upload`, {
       method: 'POST',
       body: fd
     })
@@ -816,7 +1046,7 @@ function closeStopModal() {
 async function stopJobConfirmed() {
   if (!stopTargetJob.value) return
   const jobId = stopTargetJob.value.id
-  const r = await fetch(`${API_BASE}${API_PREFIX}/jobs/${jobId}/stop`, {
+  const r = await apiFetch(`${API_BASE}${API_PREFIX}/jobs/${jobId}/stop`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ signal_type: stopSignalType.value })
@@ -859,14 +1089,7 @@ function closeLogs() {
   activeLogJobId.value = ''
 }
 
-function connectFirmwareProgressWs() {
-  // Живой прогресс firmware через WS с авто-переподключением
-  // Live firmware progress by ws with auto reconnect
-  firmwareProgressShouldReconnect = true
-  if (firmwareProgressWs && (firmwareProgressWs.readyState === WebSocket.OPEN || firmwareProgressWs.readyState === WebSocket.CONNECTING)) {
-    return
-  }
-  const path = `${API_PREFIX}/firmware/progress/ws`
+function buildWsUrl(path) {
   let wsUrl = ''
   if (!API_BASE) {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -879,6 +1102,22 @@ function connectFirmwareProgressWs() {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     wsUrl = `${proto}//${window.location.host}${API_BASE}${path}`
   }
+  if (authToken.value) {
+    const sep = wsUrl.includes('?') ? '&' : '?'
+    wsUrl = `${wsUrl}${sep}token=${encodeURIComponent(authToken.value)}`
+  }
+  return wsUrl
+}
+
+function connectFirmwareProgressWs() {
+  // Живой прогресс firmware через WS с авто-переподключением
+  // Live firmware progress by ws with auto reconnect
+  firmwareProgressShouldReconnect = true
+  if (firmwareProgressWs && (firmwareProgressWs.readyState === WebSocket.OPEN || firmwareProgressWs.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+  const path = `${API_PREFIX}/firmware/progress/ws`
+  const wsUrl = buildWsUrl(path)
   firmwareProgressWs = new WebSocket(wsUrl)
   firmwareProgressWs.onmessage = (event) => {
     // Сначала принимаем snapshot, потом инкрементальные события
@@ -939,18 +1178,7 @@ function connectRepoProgressWs() {
     return
   }
   const path = `${API_PREFIX}/repo/progress/ws`
-  let wsUrl = ''
-  if (!API_BASE) {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    wsUrl = `${proto}//${window.location.host}${path}`
-  } else if (API_BASE.startsWith('http://') || API_BASE.startsWith('https://')) {
-    const url = new URL(API_BASE)
-    const proto = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    wsUrl = `${proto}//${url.host}${path}`
-  } else {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    wsUrl = `${proto}//${window.location.host}${API_BASE}${path}`
-  }
+  const wsUrl = buildWsUrl(path)
   repoProgressWs = new WebSocket(wsUrl)
   repoProgressWs.onmessage = (event) => {
     let payload = null
@@ -990,21 +1218,67 @@ function closeRepoProgressWs() {
   repoProgressWs = null
 }
 
+function connectBuildProgressWs() {
+  buildProgressShouldReconnect = true
+  if (buildProgressWs && (buildProgressWs.readyState === WebSocket.OPEN || buildProgressWs.readyState === WebSocket.CONNECTING)) {
+    return
+  }
+  const path = `${API_PREFIX}/build/progress/ws`
+  const wsUrl = buildWsUrl(path)
+  buildProgressWs = new WebSocket(wsUrl)
+  buildProgressWs.onmessage = (event) => {
+    let payload = null
+    try {
+      payload = JSON.parse(event.data)
+    } catch {
+      return
+    }
+    if (!payload) return
+    if (payload.type === 'snapshot' && Array.isArray(payload.items)) {
+      const next = {}
+      for (const item of payload.items) {
+        const key = item?.job_id
+        if (key) next[key] = item
+      }
+      buildProgress.value = next
+      return
+    }
+    const key = payload?.job_id
+    if (payload.type === 'removed' && key) {
+      const next = { ...buildProgress.value }
+      delete next[key]
+      buildProgress.value = next
+      return
+    }
+    if (key) {
+      buildProgress.value = { ...buildProgress.value, [key]: payload }
+    }
+  }
+  buildProgressWs.onclose = () => {
+    buildProgressWs = null
+    if (!buildProgressShouldReconnect) return
+    if (buildProgressReconnect) clearTimeout(buildProgressReconnect)
+    buildProgressReconnect = setTimeout(() => connectBuildProgressWs(), 1500)
+  }
+}
+
+function closeBuildProgressWs() {
+  buildProgressShouldReconnect = false
+  if (buildProgressReconnect) {
+    clearTimeout(buildProgressReconnect)
+    buildProgressReconnect = null
+  }
+  if (buildProgressWs && typeof buildProgressWs.close === 'function') {
+    buildProgressWs.close()
+  }
+  buildProgressWs = null
+}
+
 function getWebSocketUrl(jobId) {
   // Строим WS URL из API_BASE и текущего протокола браузера
   // Build ws url from API_BASE and current browser protocol
   const path = `${API_PREFIX}/jobs/${jobId}/ws`
-  if (!API_BASE) {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${proto}//${window.location.host}${path}`
-  }
-  if (API_BASE.startsWith('http://') || API_BASE.startsWith('https://')) {
-    const url = new URL(API_BASE)
-    const proto = url.protocol === 'https:' ? 'wss:' : 'ws:'
-    return `${proto}//${url.host}${path}`
-  }
-  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${window.location.host}${API_BASE}${path}`
+  return buildWsUrl(path)
 }
 
 function openLogs(jobId) {
@@ -1012,7 +1286,9 @@ function openLogs(jobId) {
   // Logs stream by ws, \r rewrite current progress line and avoid fake new lines
   closeLogs()
   activeLogJobId.value = jobId
-  evtSource = new WebSocket(`${getWebSocketUrl(jobId)}?tail_kb=${logTailKb.value}`)
+  const baseUrl = getWebSocketUrl(jobId)
+  const sep = baseUrl.includes('?') ? '&' : '?'
+  evtSource = new WebSocket(`${baseUrl}${sep}tail_kb=${logTailKb.value}`)
   evtSource.onmessage = async (event) => {
     const el = document.getElementById('logs')
     const wasNearBottom = el ? (el.scrollHeight - el.scrollTop - el.clientHeight) < 24 : true
@@ -1120,11 +1396,13 @@ onMounted(async () => {
   if (storedFollow === '0') {
     followLogs.value = false
   }
+  await fetchAuthStatus()
   await fetchDefaults()
   await loadModsEntries()
   await fetchJobs()
   connectFirmwareProgressWs()
   connectRepoProgressWs()
+  connectBuildProgressWs()
   if (selectedJob.value) {
     selectJob(selectedJob.value)
   }
@@ -1138,6 +1416,7 @@ onUnmounted(() => {
   closeLogs()
   closeFirmwareProgressWs()
   closeRepoProgressWs()
+  closeBuildProgressWs()
   if (repoUrlSaveTimer) clearTimeout(repoUrlSaveTimer)
   if (timer) clearInterval(timer)
   window.removeEventListener('resize', syncJobsPanelHeight)
@@ -1171,6 +1450,7 @@ onUnmounted(() => {
       @open-commit="openCommitModal"
       @open-samsung-fw="openSamsungFwModal"
       @stop-progress="openStopModalForProgress"
+      @open-settings="openSettingsModal"
       @set-language="setLanguage"
     />
     <div class="mx-auto grid max-w-7xl grid-cols-1 gap-4 lg:grid-cols-3">
@@ -1198,6 +1478,7 @@ onUnmounted(() => {
           @open-upload="openUploadModal"
           @open-mods="openModsModal"
           @open-debloat="openDebloatModal"
+          @open-artifacts="openArtifactsModal"
           @open-latest="openLatestArtifactForTarget"
           @clear-uploaded-mods="clearUploadedMods"
         />
@@ -1222,6 +1503,7 @@ onUnmounted(() => {
         :parse-job-debloat-add-product="parseJobDebloatAddProduct"
         :has-job-debloat-changes="hasJobDebloatChanges"
         :job-artifact-url="jobArtifactUrl"
+        :build-progress="buildProgress"
         @select-job="selectJob"
         @open-stop="openStopModal"
         @open-mods="openJobModsModal"
@@ -1241,8 +1523,10 @@ onUnmounted(() => {
         :logs-placeholder="logsPlaceholder()"
         :api-base="API_BASE"
         :api-prefix="API_PREFIX"
+        :auth-token="authToken"
         @log-tail-change="onLogTailChange"
         @update:follow-logs="localStorage.setItem(STORAGE_FOLLOW_LOGS, $event ? '1' : '0')"
+        @open-hints="openBuildHintsModal"
       />
     </div>
     <StopJobModal
@@ -1313,6 +1597,50 @@ onUnmounted(() => {
       @delete-repo-only="deleteRepository('repo_only')"
       @delete-repo-with-out="deleteRepository('repo_with_out')"
       @git-url-input="updateRepoUrlInput"
+    />
+    <SettingsModal
+      :open="settingsModalOpen"
+      :t="t"
+      :auth-enabled="authEnabled"
+      :auth-busy="authBusy"
+      v-model:auth-password="authPassword"
+      v-model:auth-password-confirm="authPasswordConfirm"
+      v-model:repo-username="repoUsernameInput"
+      v-model:repo-token="repoTokenInput"
+      :repo-token-set="Boolean(repoInfo.git_token_set)"
+      :resources="resources"
+      :resources-loading="resourcesLoading"
+      @close="closeSettingsModal"
+      @set-password="setPassword"
+      @clear-password="clearPassword"
+      @save-repo-creds="saveRepoCredentials"
+      @refresh-resources="fetchResources"
+    />
+    <UnauthorizedModal
+      :open="unauthorizedModalOpen"
+      :t="t"
+      v-model:password="authLoginPassword"
+      :busy="authBusy"
+      @close="unauthorizedModalOpen = false"
+      @login="loginWithPassword"
+    />
+    <ArtifactsModal
+      :open="artifactsModalOpen"
+      :t="t"
+      :artifacts="artifacts"
+      :artifacts-loading="artifactsLoading"
+      :target="target"
+      :api-base="API_BASE"
+      :api-prefix="API_PREFIX"
+      :auth-token="authToken"
+      @close="closeArtifactsModal"
+    />
+    <BuildHintsModal
+      :open="buildHintsModalOpen"
+      :t="t"
+      :hints="buildHints"
+      :loading="buildHintsLoading"
+      @close="closeBuildHintsModal"
     />
     <DebloatModal
       :open="debloatModalOpen"

@@ -22,7 +22,7 @@ defineProps({
   formatDuration: { type: Function, required: true }
 })
 
-const emit = defineEmits(['open-commit', 'open-samsung-fw', 'stop-progress', 'set-language'])
+const emit = defineEmits(['open-commit', 'open-samsung-fw', 'stop-progress', 'set-language', 'open-settings'])
 </script>
 
 <template>
@@ -89,6 +89,9 @@ const emit = defineEmits(['open-commit', 'open-samsung-fw', 'stop-progress', 'se
     </button>
 
     <div class="flex items-start justify-end gap-2">
+      <button class="rounded-xl border border-slate-700 bg-slate-900/70 px-3 py-2 text-xs text-slate-200 hover:bg-slate-800/70" @click="$emit('open-settings')">
+        {{ t('settings') }}
+      </button>
       <div class="flex shrink-0 items-center">
         <label class="mr-2 self-center text-xs text-slate-300">{{ t('language') }}</label>
         <select :value="language" class="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm" @change="$emit('set-language', $event.target.value)">

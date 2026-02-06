@@ -36,6 +36,7 @@ const emit = defineEmits([
   'open-upload',
   'open-mods',
   'open-debloat',
+  'open-artifacts',
   'open-latest',
   'clear-uploaded-mods'
 ])
@@ -141,6 +142,9 @@ function onTargetChange(value) {
     </button>
     <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-debloat')">
       {{ t('debloatList') }}
+    </button>
+    <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-artifacts')">
+      {{ t('artifactsHistory') }}
     </button>
 
     <div v-if="modsDisabledCount" class="mt-2 rounded-xl border border-sky-700/60 bg-sky-900/20 p-3 text-xs text-sky-200">

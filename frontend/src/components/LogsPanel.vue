@@ -7,10 +7,11 @@ defineProps({
   logs: { type: String, required: true },
   logsPlaceholder: { type: String, required: true },
   apiBase: { type: String, required: true },
-  apiPrefix: { type: String, required: true }
+  apiPrefix: { type: String, required: true },
+  authToken: { type: String, required: true }
 })
 
-const emit = defineEmits(['update:logTailKb', 'update:followLogs', 'log-tail-change'])
+const emit = defineEmits(['update:logTailKb', 'update:followLogs', 'log-tail-change', 'open-hints'])
 </script>
 
 <template>
@@ -38,7 +39,14 @@ const emit = defineEmits(['update:logTailKb', 'update:followLogs', 'log-tail-cha
         >
           {{ t('followLogs') }}
         </button>
-        <a v-if="selectedJob?.artifact_path" :href="`${apiBase}${apiPrefix}/jobs/${selectedJob.id}/artifact`" class="rounded-lg bg-emerald-500 px-3 py-1 text-sm font-medium text-slate-950 hover:bg-emerald-400">{{ t('downloadZip') }}</a>
+        <button
+          v-if="selectedJob?.status === 'failed'"
+          class="rounded-lg border border-red-500/60 bg-red-500/20 px-2 py-1 text-xs font-semibold text-red-200 hover:bg-red-500/30"
+          @click="$emit('open-hints', selectedJob, $event)"
+        >
+          {{ t('whyBuildFailed') }}
+        </button>
+        <a v-if="selectedJob?.artifact_path" :href="`${apiBase}${apiPrefix}/jobs/${selectedJob.id}/artifact${authToken ? `?token=${encodeURIComponent(authToken)}` : ''}`" class="rounded-lg bg-emerald-500 px-3 py-1 text-sm font-medium text-slate-950 hover:bg-emerald-400">{{ t('downloadZip') }}</a>
       </div>
     </div>
     <pre id="logs" class="h-[45vh] overflow-auto rounded-xl border border-slate-800 bg-black p-3 text-xs leading-5 text-emerald-300">{{ logs || logsPlaceholder }}</pre>

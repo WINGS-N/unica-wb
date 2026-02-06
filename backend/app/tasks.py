@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import time
 import hashlib
+from urllib.parse import urlparse, quote
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
 from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
 from .firmware_progress import set_progress
+from .build_progress import set_progress as set_build_progress, remove_progress as remove_build_progress
 from .repo_progress import clear_progress as clear_repo_progress, set_progress as set_repo_progress
 from .mods_archive import validate_mods_archive
 from .models import BuildJob
@@ -68,6 +70,15 @@ _RE_ELAPSED_ETA = re.compile(r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)<(?P<eta>\
 _RE_GIT_PERCENT = re.compile(r"(\d{1,3})%")
 _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B/s)", re.IGNORECASE)
 _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
+_BUILD_STAGE_RULES = [
+    ("prepare", 5, re.compile(r"(Preparing|Setup|Init)", re.IGNORECASE)),
+    ("tools", 15, re.compile(r"Building required tools", re.IGNORECASE)),
+    ("mods", 35, re.compile(r"Applying ROM mods", re.IGNORECASE)),
+    ("patches", 50, re.compile(r"Applying patches|patch", re.IGNORECASE)),
+    ("build", 70, re.compile(r"Building|Compiling|ninja:|soong", re.IGNORECASE)),
+    ("zip", 85, re.compile(r"zip|Packaging|flashable", re.IGNORECASE)),
+    ("done", 100, re.compile(r"Build complete|Finished|done", re.IGNORECASE)),
+]
 
 
 def _guess_fw_key(text: str, known_keys: list[str]) -> str:
@@ -200,6 +211,21 @@ def _repo_progress_from_line(line: str, started_at: float) -> dict:
     if eta is not None:
         out["eta_sec"] = max(0, eta)
     return out
+
+
+def _git_auth_args(git_url: str, username: str, token: str) -> list[str]:
+    if not token:
+        return []
+    try:
+        parsed = urlparse(git_url)
+        if not parsed.scheme.startswith("http") or not parsed.hostname:
+            return []
+        user = username or "oauth2"
+        base = f"{parsed.scheme}://{parsed.hostname}/"
+        auth_prefix = f"{parsed.scheme}://{quote(user)}:{quote(token)}@{parsed.hostname}/"
+        return ["-c", f'url.{auth_prefix}.insteadOf={base}']
+    except Exception:
+        return []
 
 
 def _stream_command_with_progress(
@@ -495,7 +521,7 @@ def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
     _run_operation_job(job_id, _delete)
 
 
-def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
+def run_repo_clone_job(job_id: str, git_url: str, git_ref: str, git_username: str = "", git_token: str = ""):
     # Clone/update repo with recurse-submodules, same behavior as old init repo-sync.
     def _op(log_file: Path):
         root = _repo_root_dir()
@@ -526,12 +552,20 @@ def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
             shutil.rmtree(repo_dir, ignore_errors=True)
         repo_dir.mkdir(parents=True, exist_ok=True)
 
+        git_args = _git_auth_args(git_url, git_username, git_token)
+        safe_url = git_url
+        if "@" in safe_url and safe_url.startswith(("http://", "https://")):
+            safe_url = safe_url.split("@", 1)[1]
+            safe_url = f"https://{safe_url.split('://')[-1]}"
+        git_cfg = "git"
+        if git_args:
+            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
         rc = _stream_command_with_progress(
-            ["git", "clone", "--progress", "--recurse-submodules", git_url, str(repo_dir)],
+            ["git", *git_args, "clone", "--progress", "--recurse-submodules", git_url, str(repo_dir)],
             log_file=log_file,
             env=env,
             stage="clone",
-            title=f"Clone {git_url}",
+            title=f"Clone {safe_url}",
             on_started=lambda pid: _set_job_pid(job_id, pid),
         )
         if rc != 0:
@@ -539,13 +573,13 @@ def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
 
         setup_cmd = (
             f"cd {shlex.quote(str(repo_dir))} && "
-            "git -c safe.directory=* fetch --all --tags --prune && "
-            f"git -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
-            f"git -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
-            f"if git -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
-            f"git -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
-            "git -c safe.directory=* submodule sync --recursive && "
-            "git -c safe.directory=* submodule update --init --recursive --jobs 8"
+            f"{git_cfg} -c safe.directory=* fetch --all --tags --prune && "
+            f"{git_cfg} -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
+            f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
+            f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
+            f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
+            f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
+            f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
         )
         rc = _stream_command_with_progress(
             ["bash", "-lc", setup_cmd],
@@ -568,7 +602,7 @@ def run_repo_clone_job(job_id: str, git_url: str, git_ref: str):
     _run_operation_job(job_id, _op)
 
 
-def run_repo_pull_job(job_id: str, git_ref: str):
+def run_repo_pull_job(job_id: str, git_ref: str, git_url: str, git_username: str = "", git_token: str = ""):
     def _op(log_file: Path):
         root = _repo_root_dir()
         if not (root / ".git").is_dir():
@@ -576,13 +610,17 @@ def run_repo_pull_job(job_id: str, git_ref: str):
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         clear_repo_progress()
+        git_args = _git_auth_args(git_url, git_username, git_token)
+        git_cfg = "git"
+        if git_args:
+            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
         cmd = (
             f"cd {shlex.quote(str(root))} && "
-            "git -c safe.directory=* fetch --all --tags --prune && "
-            f"git -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
-            f"git -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
-            f"if git -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
-            f"git -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi"
+            f"{git_cfg} -c safe.directory=* fetch --all --tags --prune && "
+            f"{git_cfg} -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
+            f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
+            f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
+            f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi"
         )
         rc = _stream_command_with_progress(
             ["bash", "-lc", cmd],
@@ -600,7 +638,7 @@ def run_repo_pull_job(job_id: str, git_ref: str):
     _run_operation_job(job_id, _op)
 
 
-def run_repo_submodules_job(job_id: str):
+def run_repo_submodules_job(job_id: str, git_url: str, git_username: str = "", git_token: str = ""):
     def _op(log_file: Path):
         root = _repo_root_dir()
         if not (root / ".git").is_dir():
@@ -608,10 +646,14 @@ def run_repo_submodules_job(job_id: str):
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         clear_repo_progress()
+        git_args = _git_auth_args(git_url, git_username, git_token)
+        git_cfg = "git"
+        if git_args:
+            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
         cmd = (
             f"cd {shlex.quote(str(root))} && "
-            "git -c safe.directory=* submodule sync --recursive && "
-            "git -c safe.directory=* submodule update --init --recursive --jobs 8"
+            f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
+            f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
         )
         rc = _stream_command_with_progress(
             ["bash", "-lc", cmd],
@@ -863,6 +905,12 @@ def run_build_job(job_id: str):
 
             assert proc.stdout
             ok = False
+            current_stage = "start"
+            current_pct = 0
+            set_build_progress(
+                job.id,
+                {"type": "progress", "status": "running", "stage": current_stage, "percent": current_pct},
+            )
             try:
                 last_heartbeat = 0.0
                 while True:
@@ -872,6 +920,25 @@ def run_build_job(job_id: str):
                     lf.write(chunk.encode("utf-8", errors="ignore"))
                     lf.flush()
                     tracker.feed(chunk)
+                    for line in re.split(r"[\r\n]+", chunk):
+                        text = line.strip()
+                        if not text:
+                            continue
+                        for stage, pct, pattern in _BUILD_STAGE_RULES:
+                            if pattern.search(text) and pct >= current_pct:
+                                current_stage = stage
+                                current_pct = pct
+                                set_build_progress(
+                                    job.id,
+                                    {
+                                        "type": "progress",
+                                        "status": "running",
+                                        "stage": current_stage,
+                                        "percent": current_pct,
+                                        "message": text[:200],
+                                    },
+                                )
+                                break
                     now = time.time()
                     if now - last_heartbeat >= 1.0:
                         tracker.heartbeat()
@@ -880,6 +947,18 @@ def run_build_job(job_id: str):
                 ok = rc == 0
             finally:
                 tracker.finalize(ok)
+                status = "completed" if ok else "failed"
+                if job.status == "canceled":
+                    status = "canceled"
+                set_build_progress(
+                    job.id,
+                    {
+                        "type": "progress",
+                        "status": status,
+                        "stage": "done" if ok else current_stage,
+                        "percent": 100 if ok else current_pct,
+                    },
+                )
 
         refreshed = db.get(BuildJob, job_id)
         if refreshed:

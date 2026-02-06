@@ -17,7 +17,8 @@ defineProps({
   parseJobDebloatAddSystem: { type: Function, required: true },
   parseJobDebloatAddProduct: { type: Function, required: true },
   hasJobDebloatChanges: { type: Function, required: true },
-  jobArtifactUrl: { type: Function, required: true }
+  jobArtifactUrl: { type: Function, required: true },
+  buildProgress: { type: Object, required: true }
 })
 
 const emit = defineEmits([
@@ -88,6 +89,14 @@ const emit = defineEmits([
           </div>
         </div>
         <div class="mt-1 text-xs text-slate-400">{{ job.id }}</div>
+        <div v-if="buildProgress[job.id] && (job.status === 'running' || job.status === 'queued')" class="mt-2">
+          <div class="mb-1 flex items-center justify-between text-[10px] text-cyan-300">
+            <span>{{ buildProgress[job.id]?.stage || 'build' }} • {{ Math.round(buildProgress[job.id]?.percent || 0) }}%</span>
+          </div>
+          <div class="h-1.5 overflow-hidden rounded-full bg-slate-700">
+            <div class="h-full bg-cyan-400 transition-all duration-200" :style="{ width: `${Math.max(4, Math.round(buildProgress[job.id]?.percent || 0))}%` }" />
+          </div>
+        </div>
         <div v-if="parseJobMods(job).length" class="mt-2 text-[11px] text-cyan-300">Extra mods ({{ parseJobMods(job).length }}): {{ parseJobMods(job).map((m) => m.name || m.module_dir).join(', ') }}</div>
         <div v-if="hasJobModsConfig(job)" class="mt-1 text-[11px] text-sky-300">{{ t('modsDisabledShort') }}: {{ parseJobModsDisabled(job).length }} {{ t('entries') }}</div>
         <div v-if="parseJobDebloatDisabled(job).length" class="mt-1 text-[11px] text-amber-300">{{ t('debloatDisabledShort') }}: {{ parseJobDebloatDisabled(job).length }} {{ t('entries') }}</div>
