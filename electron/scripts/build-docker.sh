@@ -14,8 +14,11 @@ case "${TARGET}" in
   linux)
     BUILD_CMD="pnpm install --no-frozen-lockfile && pnpm run pack:linux"
     ;;
+  linux-seed)
+    BUILD_CMD="pnpm install --no-frozen-lockfile && pnpm run pack:linux:seed"
+    ;;
   linux-no-seed)
-    BUILD_CMD="pnpm install --no-frozen-lockfile && pnpm run pack:linux:no-seed"
+    BUILD_CMD="pnpm install --no-frozen-lockfile && pnpm run pack:linux"
     ;;
   win|windows)
     BUILD_CMD="pnpm install --no-frozen-lockfile && pnpm run pack:win"
@@ -25,7 +28,7 @@ case "${TARGET}" in
     ;;
   *)
     echo "Unknown target: ${TARGET}"
-    echo "Use one of: linux | linux-no-seed | win | all"
+    echo "Use one of: linux | linux-seed | win | all"
     exit 1
     ;;
 esac

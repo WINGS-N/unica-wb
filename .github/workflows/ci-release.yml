@@ -100,59 +100,10 @@ jobs:
           cache-from: type=gha,scope=unica-wb-frontend
           cache-to: type=gha,scope=unica-wb-frontend,mode=max
 
-  build-seed-images:
-    runs-on: ubuntu-22.04
-    needs:
-      - prep
-      - build-docker-images
-    defaults:
-      run:
-        working-directory: electron
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.prep.outputs.version }}
-
-      - name: Login to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
-
-      - name: Install zstd
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends zstd
-
-      - name: Pull release images
-        run: |
-          docker pull ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:${{ needs.prep.outputs.version }}
-          docker pull ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:${{ needs.prep.outputs.version }}
-          docker pull ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:${{ needs.prep.outputs.version }}
-
-      - name: Export seed images for Electron
-        env:
-          GHCR_OWNER: ${{ needs.prep.outputs.owner_lc }}
-        run: |
-          ./scripts/export-seed-images.sh \
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:${{ needs.prep.outputs.version }} \
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:${{ needs.prep.outputs.version }} \
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:${{ needs.prep.outputs.version }}
-
-      - name: Upload seed images
-        uses: actions/upload-artifact@v4
-        with:
-          name: electron-seed-images
-          path: electron/seed-images
-          if-no-files-found: error
-
   build-electron-linux:
     runs-on: ubuntu-22.04
     needs:
       - prep
-      - build-seed-images
     defaults:
       run:
         working-directory: electron
@@ -173,12 +124,6 @@ jobs:
           fi
           node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n');"
 
-      - name: Download seed images
-        uses: actions/download-artifact@v4
-        with:
-          name: electron-seed-images
-          path: electron/seed-images
-
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -197,10 +142,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      - name: Build Linux artifacts (seed + no-seed)
-        run: |
-          pnpm run ci:pack:linux
-          pnpm run ci:pack:linux:no-seed
+      - name: Build Linux artifacts
+        run: pnpm run ci:pack:linux
 
       - name: Collect artifacts
         run: |

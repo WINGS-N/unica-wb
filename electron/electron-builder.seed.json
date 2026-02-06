@@ -13,6 +13,10 @@
     {
       "from": "../docker-compose.local-repo.yml",
       "to": "docker-compose.local-repo.yml"
+    },
+    {
+      "from": "seed-images",
+      "to": "seed-images"
     }
   ],
   "linux": {
@@ -22,6 +26,6 @@
     ],
     "maintainer": "WINGS-N <wings-n@users.noreply.github.com>",
     "category": "Development",
-    "artifactName": "unica-wb-${version}.${ext}"
+    "artifactName": "unica-wb-${version}-seed.${ext}"
   }
 }
