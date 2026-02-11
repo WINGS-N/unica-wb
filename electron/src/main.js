@@ -673,6 +673,8 @@ async function maybeUpdateImages(manifest) {
   }
 
   const strictPull = process.env.ELECTRON_PULL_STRICT === '1'
+  const hasSeedMatch = manifest.images.some((item) => item?.archive && item?.image_id)
+  const pullIfUnknown = process.env.ELECTRON_PULL_IF_UNKNOWN !== '0'
   let failedPulls = 0
 
   emitStartupProgress('pull', 0, 'Checking updates for Docker images')
@@ -681,7 +683,7 @@ async function maybeUpdateImages(manifest) {
     const localTag = item?.local_tag || 'local image'
     const remoteRef = resolvePullRemoteRef(item)
     const expectedId = String(item?.image_id || '').trim()
-    if (localTag && expectedId) {
+    if (localTag && expectedId && hasSeedMatch) {
       const localId = await dockerImageId(localTag)
       if (localId && localId === expectedId) {
         emitStartupProgress(
@@ -695,6 +697,14 @@ async function maybeUpdateImages(manifest) {
     if (remoteRef) {
       const remoteRepo = repoFromImageRef(remoteRef)
       const remoteDigest = await dockerRemoteDigest(remoteRef)
+      if (!remoteDigest && !pullIfUnknown) {
+        emitStartupProgress(
+          'pull',
+          Math.round(((i + 1) / manifest.images.length) * 100),
+          `Remote digest unavailable for ${localTag}, skip pull`
+        )
+        continue
+      }
       if (remoteDigest) {
         const localDigestFromRemote = await dockerLocalRepoDigest(remoteRef, remoteRepo)
         const localDigestFromLocalTag = await dockerLocalRepoDigest(localTag, remoteRepo)
