@@ -93,10 +93,10 @@ const emit = defineEmits(['open-commit', 'open-samsung-fw', 'stop-progress', 'se
         {{ t('settings') }}
       </button>
       <div class="flex shrink-0 items-center">
-        <label class="mr-2 self-center text-xs text-slate-300">{{ t('language') }}</label>
+        <!-- <label class="mr-2 self-center text-xs text-slate-300">{{ t('language') }}</label> -->
         <select :value="language" class="rounded-xl border border-slate-700 bg-slate-800 px-3 py-1.5 text-sm" @change="$emit('set-language', $event.target.value)">
-          <option value="en">🇺🇸 English</option>
-          <option value="ru">🇷🇺 Русский</option>
+          <option value="en">&#x1F1FA;&#x1F1F8; English</option>
+          <option value="ru">&#127479;&#127482; Русский</option>
         </select>
       </div>
     </div>
