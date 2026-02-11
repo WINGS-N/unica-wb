@@ -24,7 +24,7 @@ function isEnabled(id) {
 <template>
   <Transition name="modal-fade">
     <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" @click.self="$emit('close')">
-      <div class="max-h-[90vh] w-full max-w-3xl overflow-auto rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+      <div class="max-h-[90vh] w-full max-w-3xl overflow-y-auto overflow-x-hidden rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
         <h3 class="text-lg font-semibold text-slate-100">{{ t('debloatList') }}</h3>
         <p class="mt-2 text-sm text-slate-300">
           {{ t('debloatHint') }} <span class="font-mono text-xs">unica/debloat.sh</span> {{ t('debloatHint2') }}
@@ -45,8 +45,8 @@ function isEnabled(id) {
               : 'border-red-600/50 bg-red-900/10 hover:bg-red-900/20'"
             @click="$emit('toggle', entry.id)"
           >
-            <div>
-              <div class="text-sm font-semibold text-slate-100">{{ entry.path }}</div>
+            <div class="min-w-0 flex-1">
+              <div class="break-words text-sm font-semibold text-slate-100">{{ entry.path }}</div>
               <div class="mt-1 text-xs text-slate-400">{{ entry.partition }} • {{ entry.section }}</div>
             </div>
             <button type="button" class="rounded-md px-2 py-1 text-xs font-semibold uppercase" :class="isEnabled(entry.id) ? 'bg-emerald-600/30 text-emerald-300' : 'bg-red-600/30 text-red-200'">

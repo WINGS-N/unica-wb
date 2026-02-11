@@ -41,6 +41,7 @@ class BuildJob(Base):
     debloat_add_system_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     debloat_add_product_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     mods_disabled_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ff_overrides_json: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(

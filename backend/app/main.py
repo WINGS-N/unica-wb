@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import time
 import uuid
+from collections import OrderedDict
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.error import URLError
@@ -28,6 +29,17 @@ from .config import settings
 from .cleanup import cleanup_stale_build_overrides
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
+from .ff_utils import (
+    apply_custom_features,
+    is_boolean_feature,
+    merge_floating_features,
+    normalize_ff_value,
+    parse_customize_lists,
+    parse_fallback_overrides,
+    parse_floating_feature_xml,
+    parse_shell_assignments,
+    parse_shell_vars,
+)
 from .error_hints import detect_build_hints
 from .mods_utils import parse_unica_mod_entries
 from .firmware_progress import PROGRESS_CHANNEL, clear_progress, list_progress
@@ -658,6 +670,79 @@ def _get_defaults_for_target(target: str) -> dict[str, str | int]:
     }
 
 
+def _firmware_path_from_value(value: str) -> str:
+    parts = (value or "").split("/")
+    if len(parts) < 2:
+        return ""
+    model = parts[0].strip()
+    csc = parts[1].strip()
+    if not model or not csc:
+        return ""
+    return f"{model}_{csc}"
+
+
+def _collect_ff_defaults(
+    target: str,
+    source_firmware: str,
+    target_firmware: str,
+) -> dict[str, object]:
+    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+    out_root = Path(settings.out_dir)
+    source_key = _firmware_path_from_value(source_firmware)
+    target_key = _firmware_path_from_value(target_firmware)
+    fallback_xml = Path(__file__).resolve().parents[2] / "floating_feature.xml"
+
+    source_xml = out_root / "fw" / source_key / "system/system/etc/floating_feature.xml"
+    target_xml = out_root / "fw" / target_key / "system/system/etc/floating_feature.xml"
+    if not source_xml.exists():
+        source_xml = fallback_xml
+    if not target_xml.exists():
+        target_xml = fallback_xml
+
+    source_entries = parse_floating_feature_xml(source_xml)
+    target_entries = parse_floating_feature_xml(target_xml)
+
+    customize_path = root / "unica" / "patches" / "__floating_feature" / "customize.sh"
+    lists = parse_customize_lists(customize_path)
+
+    target_vars = parse_shell_vars(root / "target" / target / "config.sh")
+    platform = target_vars.get("TARGET_PLATFORM")
+    if platform:
+        target_vars.update(parse_shell_vars(root / "platform" / platform / "config.sh"))
+    fallback_overrides = parse_fallback_overrides(customize_path, target_vars)
+
+    merged = merge_floating_features(
+        source_entries,
+        target_entries,
+        lists["deprecated"],
+        lists["blacklist"],
+        fallback_overrides,
+    )
+
+    platform_sff = OrderedDict()
+    if platform:
+        platform_sff = parse_shell_assignments(root / "platform" / platform / "sff.sh")
+    device_sff = parse_shell_assignments(root / "target" / target / "sff.sh")
+    merged = apply_custom_features(merged, platform_sff)
+    merged = apply_custom_features(merged, device_sff)
+
+    entries = []
+    for key, value in merged.items():
+        entries.append(
+            {
+                "key": key,
+                "value": value,
+                "is_boolean": is_boolean_feature(value),
+            }
+        )
+
+    return {
+        "entries": entries,
+        "source_path": str(source_xml),
+        "target_path": str(target_xml),
+    }
+
+
 def _build_signature(
     target: str,
     source_commit: str,
@@ -672,6 +757,7 @@ def _build_signature(
     debloat_add_system_signature: str,
     debloat_add_product_signature: str,
     mods_signature: str,
+    ff_signature: str,
 ) -> str:
     # Сигнатура сборки нужна для reuse готового ZIP без повторной сборки.
     payload = "|".join(
@@ -689,6 +775,7 @@ def _build_signature(
             debloat_add_system_signature,
             debloat_add_product_signature,
             mods_signature,
+            ff_signature,
         ]
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
@@ -1328,6 +1415,17 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
     debloat_signature = hashlib.sha256(debloat_disabled_json.encode("utf-8")).hexdigest()[:16]
     debloat_add_system_signature = hashlib.sha256(debloat_add_system_json.encode("utf-8")).hexdigest()[:16]
     debloat_add_product_signature = hashlib.sha256(debloat_add_product_json.encode("utf-8")).hexdigest()[:16]
+    ff_overrides_json = None
+    ff_signature = ""
+    if payload.ff_overrides:
+        ff_data = _collect_ff_defaults(payload.target, source_firmware, target_firmware)
+        valid_ff_keys = {entry["key"] for entry in ff_data.get("entries", []) if entry.get("key")}
+        invalid_keys = [k for k in payload.ff_overrides.keys() if k not in valid_ff_keys]
+        if invalid_keys:
+            raise HTTPException(400, f"Unknown floating feature keys: {', '.join(invalid_keys[:5])}")
+        normalized = {k: normalize_ff_value(v) for k, v in payload.ff_overrides.items()}
+        ff_overrides_json = json.dumps(normalized, ensure_ascii=True, sort_keys=True)
+        ff_signature = hashlib.sha256(ff_overrides_json.encode("utf-8")).hexdigest()[:16]
     build_signature = _build_signature(
         payload.target,
         source_commit,
@@ -1342,6 +1440,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         debloat_add_system_signature,
         debloat_add_product_signature,
         mods_signature,
+        ff_signature,
     )
 
     # Reuse an already built artifact for the same build signature unless forced.
@@ -1385,6 +1484,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
                 debloat_add_system_json=debloat_add_system_json,
                 debloat_add_product_json=debloat_add_product_json,
                 mods_disabled_json=mods_disabled_json,
+                ff_overrides_json=ff_overrides_json,
                 started_at=now,
                 finished_at=now,
             )
@@ -1411,6 +1511,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         debloat_add_system_json=debloat_add_system_json,
         debloat_add_product_json=debloat_add_product_json,
         mods_disabled_json=mods_disabled_json,
+        ff_overrides_json=ff_overrides_json,
     )
     db.add(job)
     db.commit()
@@ -1568,6 +1669,17 @@ async def get_debloat_options():
     root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
     entries = await asyncio.to_thread(parse_unica_debloat_entries, root)
     return {"entries": entries}
+
+
+@app.get(f"{settings.api_prefix}/floating/features")
+async def get_floating_features(target: str):
+    if target not in _get_targets():
+        raise HTTPException(400, "Unknown target")
+    defaults = await asyncio.to_thread(_get_defaults_for_target, target)
+    source_firmware = str(defaults.get("source_firmware", ""))
+    target_firmware = str(defaults.get("target_firmware", ""))
+    data = await asyncio.to_thread(_collect_ff_defaults, target, source_firmware, target_firmware)
+    return data
 
 
 @app.get(f"{settings.api_prefix}/mods/options")
