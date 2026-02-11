@@ -16,7 +16,7 @@ const disabledSet = computed(() => new Set(props.modsDisabledIds || []))
 
 <template>
   <div v-if="open" class="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/75 p-4" @click.self="$emit('close')">
-    <div class="max-h-[85vh] w-full max-w-3xl overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
+    <div class="max-h-[85vh] w-full max-w-3xl overflow-y-auto overflow-x-hidden rounded-2xl border border-slate-700 bg-slate-900 p-5 shadow-2xl">
       <div class="flex items-center justify-between">
         <h3 class="text-lg font-semibold text-slate-100">{{ t('modsList') }}</h3>
         <button class="rounded-lg border border-slate-600 px-3 py-1 text-sm text-slate-300 hover:bg-slate-800" @click="$emit('close')">{{ t('done') }}</button>
@@ -35,8 +35,8 @@ const disabledSet = computed(() => new Set(props.modsDisabledIds || []))
           :class="disabledSet.has(entry.id) ? 'border-red-600/50 bg-red-900/10 hover:bg-red-900/20' : 'border-slate-700 bg-slate-800/50 hover:bg-slate-800'"
           @click="$emit('toggle', entry.id)"
         >
-          <div>
-            <div class="text-sm font-semibold text-slate-100">{{ entry.module_dir }} - {{ entry.name || entry.module_dir }}</div>
+          <div class="min-w-0 flex-1">
+            <div class="break-words text-sm font-semibold text-slate-100">{{ entry.module_dir }} - {{ entry.name || entry.module_dir }}</div>
             <div class="mt-1 text-xs text-slate-400">{{ entry.author || 'n/a' }}</div>
           </div>
           <span

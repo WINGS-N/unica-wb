@@ -17,6 +17,7 @@ from .config import settings
 from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
 from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
+from .ff_utils import apply_ff_overrides, restore_ff_overrides
 from .firmware_progress import set_progress
 from .build_progress import set_progress as set_build_progress, remove_progress as remove_build_progress
 from .repo_progress import clear_progress as clear_repo_progress, set_progress as set_repo_progress
@@ -43,6 +44,28 @@ def _firmware_key_from_value(value: str | None) -> str:
     if not model or not csc:
         return ""
     return f"{model}_{csc}"
+
+
+def _ensure_fw_extracted(target_codename: str, source_firmware: str, target_firmware: str):
+    source_key = _firmware_key_from_value(source_firmware)
+    target_key = _firmware_key_from_value(target_firmware)
+    if not source_key or not target_key:
+        return
+    out_root = Path(settings.out_dir)
+    src_marker = out_root / "fw" / source_key / ".extracted"
+    tgt_marker = out_root / "fw" / target_key / ".extracted"
+    if src_marker.exists() and tgt_marker.exists():
+        return
+    cmd = (
+        f"cd {shlex.quote(settings.un1ca_root)} && "
+        f"source buildenv.sh {shlex.quote(target_codename)} && "
+        f"export SOURCE_FIRMWARE={shlex.quote(source_firmware)} && "
+        f"export TARGET_FIRMWARE={shlex.quote(target_firmware)} && "
+        f"scripts/extract_fw.sh"
+    )
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    subprocess.check_call(["bash", "-lc", cmd], env=env)
 
 
 def _to_bytes(number: float, unit: str) -> int:
@@ -781,6 +804,7 @@ def run_build_job(job_id: str):
     replaced_mod_dirs: list[tuple[Path, Path]] = []
     mods_override_state: dict | None = None
     debloat_override_paths: tuple[Path, Path] | None = None
+    ff_override_paths: tuple[Path, Path] | None = None
     try:
         job = db.get(BuildJob, job_id)
         if not job:
@@ -871,6 +895,18 @@ def run_build_job(job_id: str):
                     )
                 if mods_override_state and "--force" not in flags:
                     flags.append("--force")
+            except Exception:
+                pass
+        if job.ff_overrides_json:
+            try:
+                overrides = json.loads(job.ff_overrides_json or "{}")
+                if isinstance(overrides, dict) and job.source_firmware and job.target_firmware:
+                    _ensure_fw_extracted(job.target, job.source_firmware, job.target_firmware)
+                    fw_key = _firmware_key_from_value(job.target_firmware)
+                    ff_xml = Path(settings.out_dir) / "fw" / fw_key / "system/system/etc/floating_feature.xml"
+                    ff_override_paths = apply_ff_overrides(ff_xml, overrides)
+                    if ff_override_paths and "--force" not in flags:
+                        flags.append("--force")
             except Exception:
                 pass
 
@@ -1005,6 +1041,8 @@ def run_build_job(job_id: str):
             restore_debloat_file(*debloat_override_paths)
         if mods_override_state:
             restore_mods_overrides(mods_override_state)
+        if ff_override_paths:
+            restore_ff_overrides(*ff_override_paths)
         job = db.get(BuildJob, job_id)
         if job and job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
             try:

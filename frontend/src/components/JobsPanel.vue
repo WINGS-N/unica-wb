@@ -17,6 +17,8 @@ defineProps({
   parseJobDebloatAddSystem: {type: Function, required: true},
   parseJobDebloatAddProduct: {type: Function, required: true},
   hasJobDebloatChanges: {type: Function, required: true},
+  parseJobFfOverrides: {type: Function, required: true},
+  hasJobFfOverrides: {type: Function, required: true},
   jobArtifactUrl: {type: Function, required: true},
   buildProgress: {type: Object, required: true}
 })
@@ -27,6 +29,7 @@ const emit = defineEmits([
   'open-mods',
   'load-mods',
   'load-debloat',
+  'load-ff',
   'update:filterBuildOnly',
   'update:filterSucceededOnly',
   'update:filterDevice'
@@ -97,6 +100,10 @@ const emit = defineEmits([
                       class="rounded-md border border-amber-400/60 bg-amber-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-amber-300 hover:bg-amber-500/30"
                       @click.stop="$emit('load-debloat', job, $event)">{{ t('loadDebloat') }}
               </button>
+              <button v-if="hasJobFfOverrides(job)"
+                      class="rounded-md border border-cyan-400/60 bg-cyan-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-cyan-300 hover:bg-cyan-500/30"
+                      @click.stop="$emit('load-ff', job, $event)">{{ t('useFF') }}
+              </button>
               <a v-if="job.artifact_path" :href="jobArtifactUrl(job)"
                  class="rounded-md border border-emerald-400/60 bg-emerald-500/20 px-2 py-0.5 text-[10px] font-semibold uppercase text-emerald-300 hover:bg-emerald-500/30"
                  @click.stop>{{ t('downloadZip') }}</a>
@@ -135,6 +142,9 @@ const emit = defineEmits([
           +{{ parseJobDebloatAddSystem(job).length + parseJobDebloatAddProduct(job).length }} {{
             t('customDebloatPaths')
           }}
+        </div>
+        <div v-if="hasJobFfOverrides(job)" class="mt-1 text-[11px] text-cyan-300">
+          {{ t('ffOverridesForBuild') }}: {{ Object.keys(parseJobFfOverrides(job)).length }} {{ t('entries') }}
         </div>
       </button>
     </div>

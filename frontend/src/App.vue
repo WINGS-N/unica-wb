@@ -12,6 +12,7 @@ import SamsungFwModal from './components/SamsungFwModal.vue'
 import CommitModal from './components/CommitModal.vue'
 import DebloatModal from './components/DebloatModal.vue'
 import ModsModal from './components/ModsModal.vue'
+import FloatingFeatureModal from './components/FloatingFeatureModal.vue'
 import SettingsModal from './components/SettingsModal.vue'
 import BuildHintsModal from './components/BuildHintsModal.vue'
 import ArtifactsModal from './components/ArtifactsModal.vue'
@@ -62,6 +63,10 @@ const debloatDisabledIds = ref([])
 const debloatAddSystemText = ref('')
 const debloatAddProductText = ref('')
 const debloatLoading = ref(false)
+const ffModalOpen = ref(false)
+const ffEntries = ref([])
+const ffOverrides = ref({})
+const ffLoading = ref(false)
 const modsModalOpen = ref(false)
 const modsEntries = ref([])
 const modsDisabledIds = ref([])
@@ -184,6 +189,10 @@ function t(key) {
   // Фолбэк на английский, если в выбранной локали нет ключа
   // Fallback to english when selected locale have no key
   return I18N[language.value]?.[key] || I18N.en[key] || key
+}
+
+function ffOverridesCount() {
+  return Object.keys(ffOverrides.value || {}).length
 }
 
 function authHeaders() {
@@ -434,6 +443,20 @@ function parseJobDebloatAddProduct(job) {
   return parseJsonList(job?.debloat_add_product_json)
 }
 
+function parseJobFFOverrides(job) {
+  if (!job?.ff_overrides_json) return {}
+  try {
+    const parsed = JSON.parse(job.ff_overrides_json)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function hasJobFFOverrides(job) {
+  return Object.keys(parseJobFFOverrides(job)).length > 0
+}
+
 function hasJobDebloatChanges(job) {
   return (
     parseJobDebloatDisabled(job).length > 0 ||
@@ -466,6 +489,13 @@ function loadDebloatFromJob(job, event) {
   debloatModalOpen.value = true
 }
 
+function loadFFFromJob(job, event) {
+  if (event?.stopPropagation) event.stopPropagation()
+  const overrides = parseJobFFOverrides(job)
+  ffOverrides.value = { ...overrides }
+  openFFModal()
+}
+
 async function loadModsFromJob(job, event) {
   if (event) event.stopPropagation()
   if (!modsEntries.value.length) {
@@ -478,6 +508,68 @@ async function loadModsFromJob(job, event) {
 
 function debloatAddedCount() {
   return pathsTextToList(debloatAddSystemText.value).length + pathsTextToList(debloatAddProductText.value).length
+}
+
+function effectiveFFValue(entry) {
+  const override = ffOverrides.value?.[entry.key]
+  return override === undefined || override === null || override === '' ? entry.value : String(override)
+}
+
+function toggleFF(entry) {
+  const current = effectiveFFValue(entry).toUpperCase()
+  const next = current === 'TRUE' ? 'FALSE' : 'TRUE'
+  const normalizedDefault = String(entry.value || '').toUpperCase()
+  const nextOverrides = { ...(ffOverrides.value || {}) }
+  if (next === normalizedDefault) {
+    delete nextOverrides[entry.key]
+  } else {
+    nextOverrides[entry.key] = next
+  }
+  ffOverrides.value = nextOverrides
+}
+
+function updateFFValue(entry, value) {
+  const raw = String(value ?? '')
+  const defaultValue = String(entry.value || '')
+  const nextOverrides = { ...(ffOverrides.value || {}) }
+  if (!raw && defaultValue) {
+    nextOverrides[entry.key] = ''
+  } else if (raw === defaultValue) {
+    delete nextOverrides[entry.key]
+  } else {
+    nextOverrides[entry.key] = raw
+  }
+  ffOverrides.value = nextOverrides
+}
+
+function useFFDefault(entry) {
+  const nextOverrides = { ...(ffOverrides.value || {}) }
+  delete nextOverrides[entry.key]
+  ffOverrides.value = nextOverrides
+}
+
+async function loadFFEntries() {
+  ffLoading.value = true
+  try {
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/floating/features?target=${encodeURIComponent(target.value)}`)
+    const data = await r.json()
+    ffEntries.value = data.entries || []
+  } catch (e) {
+    pushToast(`${t('failedFFLoad')}: ${e.message}`, 'error')
+  } finally {
+    ffLoading.value = false
+  }
+}
+
+async function openFFModal() {
+  if (!ffEntries.value.length) {
+    await loadFFEntries()
+  }
+  ffModalOpen.value = true
+}
+
+function closeFFModal() {
+  ffModalOpen.value = false
 }
 
 function logsPlaceholder() {
@@ -659,6 +751,8 @@ async function fetchDefaults(selectedTarget) {
     const data = await r.json()
     targetOptions.value = data.target_options || []
     target.value = data.target || (targetOptions.value[0]?.code || '')
+    ffEntries.value = []
+    ffOverrides.value = {}
     sourceFirmware.value = data.defaults?.source_firmware || ''
     targetFirmware.value = data.defaults?.target_firmware || ''
     versionMajor.value = data.defaults?.version_major ?? 0
@@ -702,6 +796,7 @@ async function submitJob() {
         debloat_disabled: debloatDisabledIds.value,
         debloat_add_system: pathsTextToList(debloatAddSystemText.value),
         debloat_add_product: pathsTextToList(debloatAddProductText.value),
+        ff_overrides: ffOverridesCount() ? ffOverrides.value : null,
         force: force.value,
         no_rom_zip: noRomZip.value
       })
@@ -1469,19 +1564,21 @@ onUnmounted(() => {
           v-model:force="force"
           v-model:no-rom-zip="noRomZip"
           :loading="loading"
-          :mods-disabled-count="modsDisabledIds.length"
-          :debloat-disabled-count="debloatDisabledIds.length"
-          :uploaded-mods-id="uploadedModsId"
-          :uploaded-mods-count="uploadedMods.length"
-          @target-change="fetchDefaults"
-          @submit="submitJob"
-          @open-upload="openUploadModal"
-          @open-mods="openModsModal"
-          @open-debloat="openDebloatModal"
-          @open-artifacts="openArtifactsModal"
-          @open-latest="openLatestArtifactForTarget"
-          @clear-uploaded-mods="clearUploadedMods"
-        />
+        :mods-disabled-count="modsDisabledIds.length"
+        :debloat-disabled-count="debloatDisabledIds.length"
+        :ff-overrides-count="ffOverridesCount()"
+        :uploaded-mods-id="uploadedModsId"
+        :uploaded-mods-count="uploadedMods.length"
+        @target-change="fetchDefaults"
+        @submit="submitJob"
+        @open-upload="openUploadModal"
+        @open-mods="openModsModal"
+        @open-debloat="openDebloatModal"
+        @open-ff="openFFModal"
+        @open-artifacts="openArtifactsModal"
+        @open-latest="openLatestArtifactForTarget"
+        @clear-uploaded-mods="clearUploadedMods"
+      />
       </div>
 
       <JobsPanel
@@ -1502,6 +1599,8 @@ onUnmounted(() => {
         :parse-job-debloat-add-system="parseJobDebloatAddSystem"
         :parse-job-debloat-add-product="parseJobDebloatAddProduct"
         :has-job-debloat-changes="hasJobDebloatChanges"
+        :parse-job-ff-overrides="parseJobFFOverrides"
+        :has-job-ff-overrides="hasJobFFOverrides"
         :job-artifact-url="jobArtifactUrl"
         :build-progress="buildProgress"
         @select-job="selectJob"
@@ -1509,6 +1608,7 @@ onUnmounted(() => {
         @open-mods="openJobModsModal"
         @load-mods="loadModsFromJob"
         @load-debloat="loadDebloatFromJob"
+        @load-ff="loadFFFromJob"
         @update:filter-build-only="jobsFilterBuildOnly = $event"
         @update:filter-succeeded-only="jobsFilterSucceededOnly = $event"
         @update:filter-device="jobsFilterDevice = $event"
@@ -1653,6 +1753,17 @@ onUnmounted(() => {
       v-model:debloat-add-product-text="debloatAddProductText"
       @close="closeDebloatModal"
       @toggle="toggleDebloat"
+    />
+    <FloatingFeatureModal
+      :open="ffModalOpen"
+      :t="t"
+      :ff-loading="ffLoading"
+      :ff-entries="ffEntries"
+      :ff-overrides="ffOverrides"
+      @close="closeFFModal"
+      @toggle="toggleFF"
+      @update-value="updateFFValue"
+      @use-default="useFFDefault"
     />
     <ModsModal
       :open="modsModalOpen"

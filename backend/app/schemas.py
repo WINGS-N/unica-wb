@@ -15,6 +15,7 @@ class BuildJobCreate(BaseModel):
     debloat_disabled: list[str] | None = None
     debloat_add_system: list[str] | None = None
     debloat_add_product: list[str] | None = None
+    ff_overrides: dict[str, str | bool] | None = None
     force: bool = False
     no_rom_zip: bool = False
 
@@ -46,6 +47,7 @@ class BuildJobRead(BaseModel):
     debloat_add_system_json: str | None
     debloat_add_product_json: str | None
     mods_disabled_json: str | None
+    ff_overrides_json: str | None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

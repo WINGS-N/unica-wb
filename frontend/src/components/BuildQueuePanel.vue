@@ -17,6 +17,7 @@ defineProps({
   loading: { type: Boolean, required: true },
   modsDisabledCount: { type: Number, required: true },
   debloatDisabledCount: { type: Number, required: true },
+  ffOverridesCount: { type: Number, required: true },
   uploadedModsId: { type: String, required: true },
   uploadedModsCount: { type: Number, required: true }
 })
@@ -36,6 +37,7 @@ const emit = defineEmits([
   'open-upload',
   'open-mods',
   'open-debloat',
+  'open-ff',
   'open-artifacts',
   'open-latest',
   'clear-uploaded-mods'
@@ -143,6 +145,9 @@ function onTargetChange(value) {
     <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-debloat')">
       {{ t('debloatList') }}
     </button>
+    <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-ff')">
+      {{ t('ffEditor') }}
+    </button>
     <button class="mt-2 w-full rounded-xl border border-slate-600 px-4 py-2 text-sm font-medium text-slate-200 hover:bg-slate-800" @click="$emit('open-artifacts')">
       {{ t('artifactsHistory') }}
     </button>
@@ -152,6 +157,9 @@ function onTargetChange(value) {
     </div>
     <div v-if="debloatDisabledCount" class="mt-2 rounded-xl border border-amber-700/60 bg-amber-900/20 p-3 text-xs text-amber-200">
       {{ t('debloatDisabledForBuild') }}: {{ debloatDisabledCount }} {{ t('entries') }}
+    </div>
+    <div v-if="ffOverridesCount" class="mt-2 rounded-xl border border-cyan-700/60 bg-cyan-900/20 p-3 text-xs text-cyan-200">
+      {{ t('ffOverridesForBuild') }}: {{ ffOverridesCount }} {{ t('entries') }}
     </div>
 
     <div v-if="uploadedModsId" class="mt-2 rounded-xl border border-emerald-700/60 bg-emerald-900/20 p-3 text-xs text-emerald-200">
