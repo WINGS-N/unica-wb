@@ -655,7 +655,7 @@ def _get_target_options() -> list[dict[str, str]]:
 
 def _get_defaults_for_target(target: str) -> dict[str, str | int]:
     root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    source_firmware = _read_var_from_shell_file(root / "unica" / "configs" / "essi.sh", "SOURCE_FIRMWARE") or ""
+    source_firmware = _read_source_firmware_from_configs(root)
     target_firmware = _read_var_from_shell_file(root / "target" / target / "config.sh", "TARGET_FIRMWARE") or ""
     version_major = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MAJOR") or 0)
     version_minor = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MINOR") or 0)
@@ -668,6 +668,26 @@ def _get_defaults_for_target(target: str) -> dict[str, str | int]:
         "version_patch": version_patch,
         "version_suffix": "",
     }
+
+
+def _read_source_firmware_from_configs(root: Path) -> str:
+    configs_dir = root / "unica" / "configs"
+    preferred = ["essi.sh", "essi_64.sh", "qssi.sh", "mssi.sh"]
+    for name in preferred:
+        value = _read_var_from_shell_file(configs_dir / name, "SOURCE_FIRMWARE")
+        if value:
+            logger.info("SOURCE_FIRMWARE read from %s", configs_dir / name)
+            return value
+    if configs_dir.is_dir():
+        for cfg in sorted(configs_dir.glob("*.sh")):
+            if cfg.name == "version.sh":
+                continue
+            value = _read_var_from_shell_file(cfg, "SOURCE_FIRMWARE")
+            if value:
+                logger.info("SOURCE_FIRMWARE read from %s", cfg)
+                return value
+    logger.warning("SOURCE_FIRMWARE not found in %s", configs_dir)
+    return ""
 
 
 def _firmware_path_from_value(value: str) -> str:
