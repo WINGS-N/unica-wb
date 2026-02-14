@@ -57,7 +57,7 @@ from .queue import ARQ_QUEUE_BUILDS, ARQ_QUEUE_CONTROLS, close_arq_pool, get_arq
 from .repo_progress import PROGRESS_CHANNEL as REPO_PROGRESS_CHANNEL
 from .repo_progress import clear_progress as clear_repo_progress
 from .repo_progress import get_progress as get_repo_progress
-from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest
+from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest, AdvancedSettingsUpdate
 from .build_progress import (
     PROGRESS_CHANNEL as BUILD_PROGRESS_CHANNEL,
     list_progress as list_build_progress,
@@ -307,6 +307,14 @@ def _delete_setting(db: Session, key: str):
     if row:
         db.delete(row)
         db.commit()
+
+
+def _get_setting_value(key: str, default: str = "") -> str:
+    db = SessionLocal()
+    try:
+        return _get_setting(db, key, default)
+    finally:
+        db.close()
 
 
 def _delete_setting(db: Session, key: str):
@@ -635,6 +643,19 @@ def _make_firmware_status(firmware_value: str, cache_items: list[dict[str, str |
 
 
 def _get_targets() -> list[str]:
+    override = _get_targets_override()
+    if override:
+        return override
+    project_root = _resolve_un1ca_root_path()
+    if not project_root:
+        return []
+    root = project_root / "target"
+    if not root.is_dir():
+        return []
+    return sorted([d.name for d in root.iterdir() if d.is_dir()])
+
+
+def _get_targets_detected() -> list[str]:
     project_root = _resolve_un1ca_root_path()
     if not project_root:
         return []
@@ -648,16 +669,24 @@ def _get_target_options() -> list[dict[str, str]]:
     root = _resolve_un1ca_root_path()
     if not root:
         return []
+    override = _get_targets_override()
     options = []
-    for d in sorted([x for x in (root / "target").iterdir() if x.is_dir()], key=lambda x: x.name):
-        target_name = _read_var_from_shell_file(d / "config.sh", "TARGET_NAME") or d.name
-        options.append({"code": d.name, "name": target_name})
+    if override:
+        for code in override:
+            cfg = root / "target" / code / "config.sh"
+            target_name = _read_var_from_shell_file(cfg, "TARGET_NAME") or code
+            options.append({"code": code, "name": target_name})
+    else:
+        for d in sorted([x for x in (root / "target").iterdir() if x.is_dir()], key=lambda x: x.name):
+            target_name = _read_var_from_shell_file(d / "config.sh", "TARGET_NAME") or d.name
+            options.append({"code": d.name, "name": target_name})
     return options
 
 
 def _get_defaults_for_target(target: str) -> dict[str, str | int]:
     root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    source_firmware = _read_source_firmware_from_configs(root)
+    preferred = _preferred_source_configs_for_target(root, target)
+    source_firmware = _read_source_firmware_from_configs(root, _get_source_config_override(), preferred)
     target_firmware = _read_var_from_shell_file(root / "target" / target / "config.sh", "TARGET_FIRMWARE") or ""
     version_major = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MAJOR") or 0)
     version_minor = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MINOR") or 0)
@@ -672,14 +701,41 @@ def _get_defaults_for_target(target: str) -> dict[str, str | int]:
     }
 
 
-def _read_source_firmware_from_configs(root: Path) -> str:
+def _read_source_firmware_from_configs(
+    root: Path,
+    override: str | None = None,
+    preferred: list[str] | None = None,
+) -> str:
+    value, _ = _read_source_firmware_from_configs_with_source(root, override, preferred)
+    return value
+
+
+def _read_source_firmware_from_configs_with_source(
+    root: Path,
+    override: str | None = None,
+    preferred: list[str] | None = None,
+) -> tuple[str, str]:
     configs_dir = root / "unica" / "configs"
-    preferred = ["essi.sh", "essi_64.sh", "qssi.sh", "mssi.sh"]
-    for name in preferred:
+    if override:
+        override_name = override.strip()
+        if override_name:
+            value = _read_var_from_shell_file(configs_dir / override_name, "SOURCE_FIRMWARE")
+            if value:
+                logger.info("SOURCE_FIRMWARE read from override %s", configs_dir / override_name)
+                return value, override_name
+    preferred_list = [x for x in (preferred or []) if x]
+    if preferred_list:
+        for name in preferred_list:
+            value = _read_var_from_shell_file(configs_dir / name, "SOURCE_FIRMWARE")
+            if value:
+                logger.info("SOURCE_FIRMWARE read from %s", configs_dir / name)
+                return value, name
+    fallback = ["essi.sh", "essi_64.sh", "qssi.sh", "mssi.sh"]
+    for name in fallback:
         value = _read_var_from_shell_file(configs_dir / name, "SOURCE_FIRMWARE")
         if value:
             logger.info("SOURCE_FIRMWARE read from %s", configs_dir / name)
-            return value
+            return value, name
     if configs_dir.is_dir():
         for cfg in sorted(configs_dir.glob("*.sh")):
             if cfg.name == "version.sh":
@@ -687,9 +743,59 @@ def _read_source_firmware_from_configs(root: Path) -> str:
             value = _read_var_from_shell_file(cfg, "SOURCE_FIRMWARE")
             if value:
                 logger.info("SOURCE_FIRMWARE read from %s", cfg)
-                return value
+                return value, cfg.name
     logger.warning("SOURCE_FIRMWARE not found in %s", configs_dir)
-    return ""
+    return "", ""
+
+
+def _preferred_source_configs_for_target(root: Path, target: str) -> list[str]:
+    if not target:
+        return []
+    cfg_path = root / "target" / target / "config.sh"
+    value = _read_var_from_shell_file(cfg_path, "TARGET_SINGLE_SYSTEM_IMAGE")
+    if not value:
+        return []
+    key = value.strip().strip('"').strip("'").lower()
+    if not key:
+        return []
+    if key.endswith(".sh"):
+        return [key]
+    alias = {
+        "essi": ["essi.sh", "essi_64.sh"],
+        "essi_64": ["essi_64.sh", "essi.sh"],
+        "qssi": ["qssi.sh"],
+        "mssi": ["mssi.sh"],
+    }
+    return alias.get(key, [f"{key}.sh"])
+
+
+def _list_config_candidates(root: Path) -> list[dict[str, str | bool]]:
+    configs_dir = root / "unica" / "configs"
+    if not configs_dir.is_dir():
+        return []
+    entries: list[dict[str, str | bool]] = []
+    for cfg in sorted(configs_dir.glob("*.sh")):
+        if cfg.name == "version.sh":
+            continue
+        has_value = bool(_read_var_from_shell_file(cfg, "SOURCE_FIRMWARE"))
+        entries.append({"name": cfg.name, "has_source_firmware": has_value})
+    return entries
+
+
+def _parse_targets_override(value: str) -> list[str]:
+    if not value:
+        return []
+    parts = re.split(r"[\s,]+", value.strip())
+    return [p for p in (x.strip() for x in parts) if p]
+
+
+def _get_targets_override() -> list[str]:
+    value = _get_setting_value("targets_override").strip()
+    return _parse_targets_override(value)
+
+
+def _get_source_config_override() -> str:
+    return _get_setting_value("source_config_override").strip()
 
 
 def _firmware_path_from_value(value: str) -> str:
@@ -1599,6 +1705,81 @@ async def update_repo_config(payload: RepoConfigUpdate):
         payload.git_username,
         payload.git_token,
     )
+
+
+@app.get(f"{settings.api_prefix}/settings/advanced")
+async def get_advanced_settings(target: str | None = None):
+    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+    candidates = await asyncio.to_thread(_list_config_candidates, root)
+    preferred = await asyncio.to_thread(_preferred_source_configs_for_target, root, target or "")
+    auto_value, auto_source = await asyncio.to_thread(
+        _read_source_firmware_from_configs_with_source,
+        root,
+        None,
+        preferred,
+    )
+    override = await asyncio.to_thread(_get_source_config_override)
+    targets_override = await asyncio.to_thread(_get_setting_value, "targets_override")
+    targets_detected = await asyncio.to_thread(_get_targets_detected)
+    targets_effective = await asyncio.to_thread(_get_targets)
+    return {
+        "source_config_candidates": candidates,
+        "source_config_override": override,
+        "source_config_auto": auto_source,
+        "source_firmware_auto": auto_value,
+        "source_config_preferred": preferred,
+        "targets_override": (targets_override or "").strip(),
+        "targets_detected": targets_detected,
+        "targets_effective": targets_effective,
+    }
+
+
+@app.patch(f"{settings.api_prefix}/settings/advanced")
+async def update_advanced_settings(payload: AdvancedSettingsUpdate, target: str | None = None):
+    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+    candidates = await asyncio.to_thread(_list_config_candidates, root)
+    candidate_names = {str(x.get("name") or "") for x in candidates}
+    db = SessionLocal()
+    try:
+        if payload.source_config_override is not None:
+            value = (payload.source_config_override or "").strip()
+            if value.lower() in ("", "auto", "none"):
+                _delete_setting(db, "source_config_override")
+            else:
+                if value not in candidate_names:
+                    raise HTTPException(400, "Unknown source config override")
+                _set_setting(db, "source_config_override", value)
+
+        if payload.targets_override is not None:
+            raw = (payload.targets_override or "").strip()
+            if not raw:
+                _delete_setting(db, "targets_override")
+            else:
+                _set_setting(db, "targets_override", raw)
+    finally:
+        db.close()
+
+    preferred = await asyncio.to_thread(_preferred_source_configs_for_target, root, target or "")
+    auto_value, auto_source = await asyncio.to_thread(
+        _read_source_firmware_from_configs_with_source,
+        root,
+        None,
+        preferred,
+    )
+    override = await asyncio.to_thread(_get_source_config_override)
+    targets_override = await asyncio.to_thread(_get_setting_value, "targets_override")
+    targets_detected = await asyncio.to_thread(_get_targets_detected)
+    targets_effective = await asyncio.to_thread(_get_targets)
+    return {
+        "source_config_candidates": candidates,
+        "source_config_override": override,
+        "source_config_auto": auto_source,
+        "source_firmware_auto": auto_value,
+        "source_config_preferred": preferred,
+        "targets_override": (targets_override or "").strip(),
+        "targets_detected": targets_detected,
+        "targets_effective": targets_effective,
+    }
 
 
 @app.post(f"{settings.api_prefix}/repo/clone", response_model=BuildJobRead)

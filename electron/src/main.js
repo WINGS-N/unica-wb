@@ -48,6 +48,9 @@ let quitRequested = false
 let dockerMode = 'plain'
 let dockerContext = process.env.ELECTRON_DOCKER_CONTEXT || ''
 let dockerHost = process.env.ELECTRON_DOCKER_HOST || ''
+if (process.platform === 'linux' && !dockerContext) {
+  dockerContext = 'default'
+}
 let sudoKeepaliveTimer = null
 let preferredLanguage = 'en'
 let lastProgressPayload = null
@@ -422,9 +425,13 @@ async function configureDockerAccess() {
     }
   }
 
-  throw new Error(
-    'Rootful Docker is required for privileged worker. Could not switch from rootless mode automatically.'
-  )
+  const finalMode = dockerMode || 'plain'
+  const stillRootless = await dockerIsRootless(finalMode, dockerContext, dockerHost).catch(() => true)
+  if (stillRootless) {
+    throw new Error(
+      'Rootful Docker is required for privileged worker. Rootless daemon detected after all attempts.'
+    )
+  }
 }
 
 function toBytes(value, unit) {

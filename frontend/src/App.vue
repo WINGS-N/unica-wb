@@ -100,6 +100,20 @@ const repoSync = ref({
 })
 const repoActionBusy = ref(false)
 const commitModalOpen = ref(false)
+const advancedLoading = ref(false)
+const advancedBusy = ref(false)
+const advancedSettings = ref({
+  source_config_candidates: [],
+  source_config_override: '',
+  source_config_auto: '',
+  source_firmware_auto: '',
+  source_config_preferred: [],
+  targets_override: '',
+  targets_detected: [],
+  targets_effective: []
+})
+const advancedSourceOverrideInput = ref('')
+const advancedTargetsOverrideInput = ref('')
 const repoInfo = ref({
   git_url: '',
   git_ref: '',
@@ -357,11 +371,55 @@ async function fetchResources() {
   }
 }
 
+async function fetchAdvancedSettings() {
+  advancedLoading.value = true
+  try {
+    const targetParam = target.value ? `?target=${encodeURIComponent(target.value)}` : ''
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/settings/advanced${targetParam}`)
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    advancedSettings.value = { ...advancedSettings.value, ...data }
+    advancedSourceOverrideInput.value = data.source_config_override || ''
+    advancedTargetsOverrideInput.value = data.targets_override || ''
+  } catch (e) {
+    pushToast(`${t('advancedLoadFailed')}: ${e.message}`, 'error')
+  } finally {
+    advancedLoading.value = false
+  }
+}
+
+async function saveAdvancedSettings() {
+  advancedBusy.value = true
+  try {
+    const targetParam = target.value ? `?target=${encodeURIComponent(target.value)}` : ''
+    const r = await apiFetch(`${API_BASE}${API_PREFIX}/settings/advanced${targetParam}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        source_config_override: advancedSourceOverrideInput.value || '',
+        targets_override: advancedTargetsOverrideInput.value || ''
+      })
+    })
+    if (!r.ok) throw new Error(await r.text())
+    const data = await r.json()
+    advancedSettings.value = { ...advancedSettings.value, ...data }
+    advancedSourceOverrideInput.value = data.source_config_override || ''
+    advancedTargetsOverrideInput.value = data.targets_override || ''
+    pushToast(t('advancedSaved'), 'success')
+    await fetchDefaults(target.value || '')
+  } catch (e) {
+    pushToast(`${t('advancedSaveFailed')}: ${e.message}`, 'error')
+  } finally {
+    advancedBusy.value = false
+  }
+}
+
 function openSettingsModal() {
   settingsModalOpen.value = true
   repoUsernameInput.value = repoInfo.value.git_username || ''
   repoTokenInput.value = ''
   fetchResources()
+  fetchAdvancedSettings()
 }
 
 function closeSettingsModal() {
@@ -1710,11 +1768,22 @@ onUnmounted(() => {
       :repo-token-set="Boolean(repoInfo.git_token_set)"
       :resources="resources"
       :resources-loading="resourcesLoading"
+      :advanced-loading="advancedLoading"
+      :advanced-busy="advancedBusy"
+      :source-config-candidates="advancedSettings.source_config_candidates"
+      :source-config-auto="advancedSettings.source_config_auto"
+      :source-firmware-auto="advancedSettings.source_firmware_auto"
+      :source-config-preferred="advancedSettings.source_config_preferred"
+      v-model:source-config-override="advancedSourceOverrideInput"
+      :targets-detected="advancedSettings.targets_detected"
+      :targets-effective="advancedSettings.targets_effective"
+      v-model:targets-override="advancedTargetsOverrideInput"
       @close="closeSettingsModal"
       @set-password="setPassword"
       @clear-password="clearPassword"
       @save-repo-creds="saveRepoCredentials"
       @refresh-resources="fetchResources"
+      @save-advanced="saveAdvancedSettings"
     />
     <UnauthorizedModal
       :open="unauthorizedModalOpen"

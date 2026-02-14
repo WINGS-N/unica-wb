@@ -64,3 +64,8 @@ class RepoConfigUpdate(BaseModel):
     git_url: str = Field(min_length=8, max_length=512)
     git_username: str | None = Field(default=None, max_length=128)
     git_token: str | None = Field(default=None, max_length=512)
+
+
+class AdvancedSettingsUpdate(BaseModel):
+    source_config_override: str | None = Field(default=None, max_length=128)
+    targets_override: str | None = Field(default=None, max_length=4096)
