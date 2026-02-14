@@ -78,6 +78,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     webp \
     zip \
     zstd \
+    pcre2-utils \
     && rm -rf /var/lib/apt/lists/*
 
 FROM worker-base AS worker
