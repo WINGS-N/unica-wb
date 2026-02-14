@@ -372,14 +372,22 @@ async function configureDockerAccess() {
 
   // Сначала пробуем обычный docker или явный context/host из env.
   // First try plain docker or explicit context/host from env.
-  const isRootlessNow = await dockerIsRootless('plain', dockerContext, dockerHost).catch(() => false)
-  if (!isRootlessNow) return
+  let isRootlessNow = null
+  try {
+    isRootlessNow = await dockerIsRootless('plain', dockerContext, dockerHost)
+  } catch {
+    isRootlessNow = null
+  }
+  if (isRootlessNow === false) return
+  if (isRootlessNow === null) {
+    emitProgress({ stage: 'check', progress: 20, message: 'Docker rootless check failed, trying sudo/pkexec' })
+  }
 
   // Авто-переключение на context default часто переводит в rootful daemon.
   // Auto switch to context default often moves to rootful daemon.
   if (!dockerContext) {
-    const defaultRootless = await dockerIsRootless('plain', 'default', dockerHost).catch(() => true)
-    if (!defaultRootless) {
+    const defaultRootless = await dockerIsRootless('plain', 'default', dockerHost).catch(() => null)
+    if (defaultRootless === false) {
       dockerContext = 'default'
       emitProgress({ stage: 'check', progress: 40, message: 'Switched to docker context: default' })
       return
