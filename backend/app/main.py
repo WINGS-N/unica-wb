@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import base64
 import concurrent.futures
 import os
@@ -64,6 +65,7 @@ from .build_progress import (
 )
 
 app = FastAPI(title=settings.app_name)
+logger = logging.getLogger(__name__)
 
 _FIRMWARE_LATEST_TIMEOUT_SEC = 10.0
 _FIRMWARE_LATEST_TTL_SEC = 3600.0
