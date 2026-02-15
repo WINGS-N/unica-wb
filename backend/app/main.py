@@ -666,10 +666,12 @@ def _get_targets_detected() -> list[str]:
 
 
 def _get_target_options() -> list[dict[str, str]]:
+    override = _get_targets_override()
     root = _resolve_un1ca_root_path()
     if not root:
+        if override:
+            return [{"code": code, "name": code} for code in override]
         return []
-    override = _get_targets_override()
     options = []
     if override:
         for code in override:
@@ -1656,6 +1658,9 @@ async def get_defaults(target: str | None = None):
     # Этот endpoint кормит почти весь UI: target list, defaults, commit info, firmware statuses.
     target_options = await asyncio.to_thread(_get_target_options)
     targets = [str(x.get("code") or "") for x in target_options if x.get("code")]
+    if not target_options:
+        targets = await asyncio.to_thread(_get_targets)
+        target_options = [{"code": code, "name": code} for code in targets]
     selected_target = target
     if not selected_target:
         selected_target = "b0s" if "b0s" in targets else (targets[0] if targets else "")
