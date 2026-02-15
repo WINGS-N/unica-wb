@@ -102,6 +102,7 @@ const repoActionBusy = ref(false)
 const commitModalOpen = ref(false)
 const advancedLoading = ref(false)
 const advancedBusy = ref(false)
+let advancedSaveTimer = null
 const advancedSettings = ref({
   source_config_candidates: [],
   source_config_override: '',
@@ -388,7 +389,7 @@ async function fetchAdvancedSettings() {
   }
 }
 
-async function saveAdvancedSettings() {
+async function saveAdvancedSettings(showToast = true) {
   advancedBusy.value = true
   try {
     const targetParam = target.value ? `?target=${encodeURIComponent(target.value)}` : ''
@@ -405,13 +406,23 @@ async function saveAdvancedSettings() {
     advancedSettings.value = { ...advancedSettings.value, ...data }
     advancedSourceOverrideInput.value = data.source_config_override || ''
     advancedTargetsOverrideInput.value = data.targets_override || ''
-    pushToast(t('advancedSaved'), 'success')
+    if (showToast) {
+      pushToast(t('advancedSaved'), 'success')
+    }
     await fetchDefaults(target.value || '')
   } catch (e) {
     pushToast(`${t('advancedSaveFailed')}: ${e.message}`, 'error')
   } finally {
     advancedBusy.value = false
   }
+}
+
+function requestAdvancedSave() {
+  if (advancedSaveTimer) clearTimeout(advancedSaveTimer)
+  advancedSaveTimer = setTimeout(() => {
+    advancedSaveTimer = null
+    saveAdvancedSettings(true)
+  }, 700)
 }
 
 function openSettingsModal() {
@@ -1783,7 +1794,7 @@ onUnmounted(() => {
       @clear-password="clearPassword"
       @save-repo-creds="saveRepoCredentials"
       @refresh-resources="fetchResources"
-      @save-advanced="saveAdvancedSettings"
+      @save-advanced="requestAdvancedSave"
     />
     <UnauthorizedModal
       :open="unauthorizedModalOpen"

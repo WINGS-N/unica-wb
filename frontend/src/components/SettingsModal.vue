@@ -39,7 +39,7 @@ const emit = defineEmits([
 ])
 
 function isPreferred(name) {
-  return Array.isArray(sourceConfigPreferred) && sourceConfigPreferred.includes(name)
+  return Array.isArray(props.sourceConfigPreferred) && props.sourceConfigPreferred.includes(name)
 }
 
 function formatBytes(value) {
@@ -142,19 +142,35 @@ function formatBytes(value) {
                 :key="cfg.name"
                 type="button"
                 class="flex items-center gap-2 rounded-md border px-2 py-1 text-left text-[11px]"
-                :class="isPreferred(cfg.name)
-                  ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-100'
-                  : 'border-slate-700 bg-transparent text-slate-300'"
+                :class="cfg.has_source_firmware
+                  ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-100'
+                  : (isPreferred(cfg.name)
+                    ? 'border-cyan-500/60 bg-cyan-500/10 text-cyan-100'
+                    : 'border-slate-700 bg-transparent text-slate-300')"
                 @click="$emit('update:sourceConfigOverride', cfg.name); $emit('save-advanced')"
               >
-                <input type="checkbox" disabled :checked="Boolean(cfg.has_source_firmware)" />
+                <span
+                  class="flex h-4 w-4 items-center justify-center rounded border text-[10px]"
+                  :class="cfg.has_source_firmware ? 'border-emerald-500/60 bg-emerald-500/20 text-emerald-200' : 'border-slate-600 text-slate-400'"
+                >
+                  {{ cfg.has_source_firmware ? '✓' : '' }}
+                </span>
                 <span class="font-mono">{{ cfg.name }}</span>
                 <span class="text-slate-500">{{ cfg.has_source_firmware ? t('detected') : t('notDetected') }}</span>
                 <span v-if="isPreferred(cfg.name)" class="ml-auto text-[10px] uppercase text-cyan-300">{{ t('preferred') }}</span>
               </button>
             </div>
 
-            <label class="mt-2 block text-[11px] text-slate-400">{{ t('sourceConfigOverride') }}</label>
+            <div class="mt-2 flex items-center justify-between">
+              <label class="block text-[11px] text-slate-400">{{ t('sourceConfigOverride') }}</label>
+              <button
+                type="button"
+                class="rounded-md border border-slate-700 px-2 py-0.5 text-[10px] uppercase text-slate-300 hover:bg-slate-800"
+                @click="$emit('update:sourceConfigOverride', ''); $emit('save-advanced')"
+              >
+                {{ t('useDefault') }}
+              </button>
+            </div>
             <select
               class="mt-1 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200"
               :value="sourceConfigOverride || ''"
@@ -178,7 +194,16 @@ function formatBytes(value) {
               {{ t('targetsEffective') }}: <span class="font-mono text-slate-200">{{ targetsEffective.length }}</span>
             </div>
 
-            <label class="mt-2 block text-[11px] text-slate-400">{{ t('targetsOverride') }}</label>
+            <div class="mt-2 flex items-center justify-between">
+              <label class="block text-[11px] text-slate-400">{{ t('targetsOverride') }}</label>
+              <button
+                type="button"
+                class="rounded-md border border-slate-700 px-2 py-0.5 text-[10px] uppercase text-slate-300 hover:bg-slate-800"
+                @click="$emit('update:targetsOverride', ''); $emit('save-advanced')"
+              >
+                {{ t('useDefault') }}
+              </button>
+            </div>
             <textarea
               class="mt-1 h-16 w-full rounded-lg border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-200"
               :value="targetsOverride"
