@@ -35,7 +35,8 @@ const emit = defineEmits([
   'update:repoUsername',
   'update:repoToken',
   'update:sourceConfigOverride',
-  'update:targetsOverride'
+  'update:targetsOverride',
+  'toggle-target-override'
 ])
 
 function isPreferred(name) {
@@ -192,6 +193,20 @@ function formatBytes(value) {
             </div>
             <div class="mt-1 text-[11px] text-slate-400">
               {{ t('targetsEffective') }}: <span class="font-mono text-slate-200">{{ targetsEffective.length }}</span>
+            </div>
+            <div v-if="targetsDetected.length" class="mt-2 flex flex-wrap gap-1">
+              <button
+                v-for="code in targetsDetected"
+                :key="code"
+                type="button"
+                class="rounded-md border px-2 py-0.5 text-[10px] uppercase"
+                :class="String(targetsOverride || '').includes(code)
+                  ? 'border-emerald-500/60 bg-emerald-500/20 text-emerald-200'
+                  : 'border-slate-700 bg-slate-900 text-slate-300'"
+                @click="$emit('toggle-target-override', code)"
+              >
+                {{ code }}
+              </button>
             </div>
 
             <div class="mt-2 flex items-center justify-between">

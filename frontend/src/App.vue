@@ -425,6 +425,19 @@ function requestAdvancedSave() {
   }, 700)
 }
 
+function toggleTargetOverride(code) {
+  const current = (advancedTargetsOverrideInput.value || '')
+  const lines = current.split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+  const set = new Set(lines)
+  if (set.has(code)) {
+    set.delete(code)
+  } else {
+    set.add(code)
+  }
+  advancedTargetsOverrideInput.value = Array.from(set).join('\n')
+  requestAdvancedSave()
+}
+
 function openSettingsModal() {
   settingsModalOpen.value = true
   repoUsernameInput.value = repoInfo.value.git_username || ''
@@ -1795,6 +1808,7 @@ onUnmounted(() => {
       @save-repo-creds="saveRepoCredentials"
       @refresh-resources="fetchResources"
       @save-advanced="requestAdvancedSave"
+      @toggle-target-override="toggleTargetOverride"
     />
     <UnauthorizedModal
       :open="unauthorizedModalOpen"
