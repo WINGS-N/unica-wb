@@ -138,6 +138,7 @@
     .actions {
       margin-top: 12px;
       display: none;
+      gap: 8px;
     }
     .overlay {
       position: fixed;
@@ -226,7 +227,10 @@
       <pre id="logs" class="logs">[boot] waiting for progress events...</pre>
 
       <div id="error" class="error"></div>
-      <div id="actions" class="actions"><button id="retry">Retry startup</button></div>
+      <div id="actions" class="actions">
+        <button id="fixLoop" style="display:none;">Fix loop devices</button>
+        <button id="retry">Retry startup</button>
+      </div>
     </div>
   </div>
   <div id="sudoOverlay" class="overlay">
@@ -270,6 +274,7 @@
     const errorEl = document.getElementById('error')
     const actionsEl = document.getElementById('actions')
     const retryBtn = document.getElementById('retry')
+    const fixLoopBtn = document.getElementById('fixLoop')
     const sudoOverlay = document.getElementById('sudoOverlay')
     const sudoTitle = document.getElementById('sudoTitle')
     const sudoText = document.getElementById('sudoText')
@@ -388,7 +393,8 @@
     if (window.startupApi?.onError) {
       window.startupApi.onError((payload) => {
         errorEl.style.display = 'block'
-        actionsEl.style.display = 'block'
+        actionsEl.style.display = 'flex'
+        fixLoopBtn.style.display = payload?.canFixLoop ? 'inline-block' : 'none'
         errorEl.textContent = payload?.message || 'Unknown startup error'
       })
     }
@@ -432,6 +438,14 @@
       metaEl.textContent = ''
       messageEl.textContent = 'Retrying startup...'
       await window.startupApi.retry()
+    })
+
+    fixLoopBtn.addEventListener('click', async () => {
+      errorEl.style.display = 'none'
+      actionsEl.style.display = 'none'
+      metaEl.textContent = ''
+      messageEl.textContent = 'Fixing loop devices...'
+      await window.startupApi.fixLoopDevices()
     })
 
     // If progress event was sent before renderer listeners were attached, restore it from main process

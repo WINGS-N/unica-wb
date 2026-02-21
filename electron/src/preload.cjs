@@ -24,6 +24,9 @@ contextBridge.exposeInMainWorld('startupApi', {
   },
   retry() {
     return ipcRenderer.invoke('startup:retry')
+  },
+  fixLoopDevices() {
+    return ipcRenderer.invoke('startup:fix-loop')
   }
 })
 

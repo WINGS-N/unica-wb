@@ -63,6 +63,15 @@ let i18nStrings = {
   exit: 'Exit'
 }
 
+class StartupRecoverableError extends Error {
+  constructor(message, payload = {}) {
+    super(message)
+    this.name = 'StartupRecoverableError'
+    this.recoverable = true
+    this.payload = payload
+  }
+}
+
 if (!singleInstanceLock) {
   app.quit()
 }
@@ -93,10 +102,22 @@ function emitStartupProgress(stage, progress, message, extra = {}) {
   })
 }
 
-function emitError(message) {
+function emitError(input) {
+  const payload = typeof input === 'string' ? { message: input } : (input || {})
   if (splashWindow && !splashWindow.isDestroyed()) {
-    splashWindow.webContents.send('startup:error', { message })
+    splashWindow.webContents.send('startup:error', payload)
   }
+}
+
+function isLoopRelatedText(text) {
+  const s = String(text || '').toLowerCase()
+  if (!s) return false
+  return (
+    s.includes('failed to setup loop device') ||
+    s.includes('loop device') ||
+    s.includes('/dev/loop') ||
+    s.includes('losetup')
+  )
 }
 
 function getExitDialogTexts() {
@@ -432,6 +453,84 @@ async function configureDockerAccess() {
       'Rootful Docker is required for privileged worker. Rootless daemon detected after all attempts.'
     )
   }
+}
+
+function requiredLoopDevicePaths() {
+  const items = ['/dev/loop-control']
+  for (let i = 0; i <= 7; i += 1) items.push(`/dev/loop${i}`)
+  return items
+}
+
+async function getMissingLoopDevices() {
+  const checks = requiredLoopDevicePaths().map((p) => `[ -e ${JSON.stringify(p)} ] || echo ${JSON.stringify(p)}`).join('; ')
+  const out = await runCommand('bash', ['-lc', checks], { timeoutMs: 10000 }).catch(() => ({ stdout: '' }))
+  return String(out.stdout || '').split('\n').map((s) => s.trim()).filter(Boolean)
+}
+
+function loopMissingMessage(missing) {
+  const details = missing.join(', ')
+  return [
+    'Required loop devices are missing on the host.',
+    `Missing: ${details}`,
+    '',
+    'Click "Fix loop devices" to run:',
+    'sudo modprobe loop max_loop=64',
+    'sudo mknod /dev/loopN ... (for N=0..7)'
+  ].join('\n')
+}
+
+async function assertLoopDevicesReady() {
+  const missing = await getMissingLoopDevices()
+  if (!missing.length) return
+  throw new StartupRecoverableError(loopMissingMessage(missing), {
+    message: loopMissingMessage(missing),
+    code: 'loop_devices_missing',
+    canFixLoop: true
+  })
+}
+
+async function ensureSudoSessionForFix() {
+  const valid = await runCommand('sudo', ['-n', '-v']).then(() => true).catch(() => false)
+  if (valid) return true
+  const ok = await sudoValidateSession()
+  if (!ok) return false
+  startSudoKeepalive()
+  return true
+}
+
+async function fixLoopDevices() {
+  emitStartupProgress('check', 35, 'Fixing loop devices on host')
+  const canSudo = await commandExists('sudo')
+  if (!canSudo) {
+    throw new StartupRecoverableError('sudo is required to fix loop devices automatically.', {
+      message: 'sudo is required to fix loop devices automatically.',
+      code: 'loop_devices_fix_failed',
+      canFixLoop: true
+    })
+  }
+  const authed = await ensureSudoSessionForFix()
+  if (!authed) {
+    throw new StartupRecoverableError('Sudo authentication was cancelled.', {
+      message: 'Sudo authentication was cancelled.',
+      code: 'loop_devices_fix_cancelled',
+      canFixLoop: true
+    })
+  }
+  const cmd = [
+    'set -eu',
+    'modprobe loop max_loop=64',
+    'i=0',
+    'while [ "$i" -le 7 ]; do',
+    '  if [ ! -b "/dev/loop$i" ]; then',
+    '    mknod -m 660 "/dev/loop$i" b 7 "$i"',
+    '  fi',
+    '  chgrp disk "/dev/loop$i" || true',
+    '  i=$((i+1))',
+    'done'
+  ].join('\n')
+  await runCommand('sudo', ['bash', '-lc', cmd], { timeoutMs: 30000 })
+  await assertLoopDevicesReady()
+  emitStartupProgress('check', 45, 'Loop devices are ready')
 }
 
 function toBytes(value, unit) {
@@ -1135,6 +1234,8 @@ async function startup() {
     emitStartupProgress('check', 20, 'Checking Docker daemon')
     await configureDockerAccess()
     await runDocker(['version'])
+    emitStartupProgress('check', 70, 'Checking loop devices')
+    await assertLoopDevicesReady()
     emitStartupProgress('check', 100, 'Docker is available')
 
     const manifest = loadSeedManifest()
@@ -1152,10 +1253,17 @@ async function startup() {
       splashWindow.close()
     }
   } catch (error) {
+    if (error?.recoverable) {
+      emitError(error.payload || { message: error.message || 'Startup failed' })
+      return
+    }
     emitProgress({ stage: 'shutdown', progress: 0, totalProgress: 0, message: 'Startup failed, cleaning up compose services...' })
     await composeDown().catch(() => {})
     const text = `${error.message}\n\n${error.stderr || ''}`.trim()
-    emitError(text)
+    emitError({
+      message: text,
+      canFixLoop: isLoopRelatedText(text)
+    })
     dialog.showErrorBox('Startup failed', text)
   } finally {
     startupRunning = false
@@ -1187,6 +1295,27 @@ app.on('second-instance', () => {
 ipcMain.handle('startup:retry', async () => {
   await startup()
   return { ok: true }
+})
+
+ipcMain.handle('startup:fix-loop', async () => {
+  if (startupRunning) return { ok: false, busy: true }
+  try {
+    await fixLoopDevices()
+    await startup()
+    return { ok: true }
+  } catch (error) {
+    if (error?.recoverable) {
+      emitError(error.payload || { message: error.message || 'Loop fix failed' })
+      return { ok: false, recoverable: true }
+    }
+    const text = `${error.message}\n\n${error.stderr || ''}`.trim()
+    emitError({
+      message: text,
+      canFixLoop: isLoopRelatedText(text),
+      code: 'loop_devices_fix_failed'
+    })
+    return { ok: false, recoverable: false }
+  }
 })
 
 ipcMain.handle('startup:get-last-progress', async () => {
