@@ -228,7 +228,7 @@
 
       <div id="error" class="error"></div>
       <div id="actions" class="actions">
-        <button id="fixLoop" style="display:none;">Fix loop devices</button>
+        <button id="fixIssue" style="display:none;">Fix runtime issue</button>
         <button id="retry">Retry startup</button>
       </div>
     </div>
@@ -274,13 +274,14 @@
     const errorEl = document.getElementById('error')
     const actionsEl = document.getElementById('actions')
     const retryBtn = document.getElementById('retry')
-    const fixLoopBtn = document.getElementById('fixLoop')
+    const fixIssueBtn = document.getElementById('fixIssue')
     const sudoOverlay = document.getElementById('sudoOverlay')
     const sudoTitle = document.getElementById('sudoTitle')
     const sudoText = document.getElementById('sudoText')
     const sudoInput = document.getElementById('sudoInput')
     const sudoCancel = document.getElementById('sudoCancel')
     const sudoSubmit = document.getElementById('sudoSubmit')
+    let currentFixKind = ''
 
     if (splashMode === 'shutdown') {
       messageEl.textContent = 'Stopping...'
@@ -394,7 +395,14 @@
       window.startupApi.onError((payload) => {
         errorEl.style.display = 'block'
         actionsEl.style.display = 'flex'
-        fixLoopBtn.style.display = payload?.canFixLoop ? 'inline-block' : 'none'
+        const canFix = Boolean(payload?.canFixLoop || payload?.canFixF2fs || payload?.canFixFuse)
+        currentFixKind = String(payload?.fixKind || (
+          payload?.canFixLoop ? 'loop' : (payload?.canFixF2fs ? 'f2fs' : (payload?.canFixFuse ? 'fuse' : ''))
+        ))
+        fixIssueBtn.textContent = payload?.fixLabel || (
+          currentFixKind === 'f2fs' ? 'Enable f2fs module' : (currentFixKind === 'fuse' ? 'Enable FUSE support' : 'Fix loop devices')
+        )
+        fixIssueBtn.style.display = canFix ? 'inline-block' : 'none'
         errorEl.textContent = payload?.message || 'Unknown startup error'
       })
     }
@@ -440,12 +448,20 @@
       await window.startupApi.retry()
     })
 
-    fixLoopBtn.addEventListener('click', async () => {
+    fixIssueBtn.addEventListener('click', async () => {
       errorEl.style.display = 'none'
       actionsEl.style.display = 'none'
       metaEl.textContent = ''
-      messageEl.textContent = 'Fixing loop devices...'
-      await window.startupApi.fixLoopDevices()
+      if (currentFixKind === 'f2fs') {
+        messageEl.textContent = 'Enabling f2fs module...'
+        await window.startupApi.fixF2fsSupport()
+      } else if (currentFixKind === 'fuse') {
+        messageEl.textContent = 'Enabling FUSE support...'
+        await window.startupApi.fixFuseSupport()
+      } else {
+        messageEl.textContent = 'Fixing loop devices...'
+        await window.startupApi.fixLoopDevices()
+      }
     })
 
     // If progress event was sent before renderer listeners were attached, restore it from main process

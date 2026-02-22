@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld('startupApi', {
   },
   fixLoopDevices() {
     return ipcRenderer.invoke('startup:fix-loop')
+  },
+  fixF2fsSupport() {
+    return ipcRenderer.invoke('startup:fix-f2fs')
+  },
+  fixFuseSupport() {
+    return ipcRenderer.invoke('startup:fix-fuse')
   }
 })
 

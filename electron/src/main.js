@@ -120,6 +120,31 @@ function isLoopRelatedText(text) {
   )
 }
 
+function isF2fsRelatedText(text) {
+  const s = String(text || '').toLowerCase()
+  if (!s) return false
+  return (
+    s.includes("unknown filesystem type 'f2fs'") ||
+    s.includes('unknown filesystem type "f2fs"') ||
+    s.includes('filesystem type \'f2fs\'') ||
+    s.includes('filesystem type "f2fs"') ||
+    s.includes(' f2fs')
+  )
+}
+
+function isFuseRelatedText(text) {
+  const s = String(text || '').toLowerCase()
+  if (!s) return false
+  return (
+    s.includes('fuse.erofs') ||
+    s.includes('/dev/fuse') ||
+    s.includes("fuse: device not found") ||
+    s.includes("try 'modprobe fuse' first") ||
+    s.includes('unknown filesystem type \'fuse\'') ||
+    s.includes('unknown filesystem type "fuse"')
+  )
+}
+
 function getExitDialogTexts() {
   const isRu = preferredLanguage === 'ru'
   return {
@@ -485,7 +510,9 @@ async function assertLoopDevicesReady() {
   throw new StartupRecoverableError(loopMissingMessage(missing), {
     message: loopMissingMessage(missing),
     code: 'loop_devices_missing',
-    canFixLoop: true
+    canFixLoop: true,
+    fixKind: 'loop',
+    fixLabel: 'Fix loop devices'
   })
 }
 
@@ -505,7 +532,9 @@ async function fixLoopDevices() {
     throw new StartupRecoverableError('sudo is required to fix loop devices automatically.', {
       message: 'sudo is required to fix loop devices automatically.',
       code: 'loop_devices_fix_failed',
-      canFixLoop: true
+      canFixLoop: true,
+      fixKind: 'loop',
+      fixLabel: 'Fix loop devices'
     })
   }
   const authed = await ensureSudoSessionForFix()
@@ -513,7 +542,9 @@ async function fixLoopDevices() {
     throw new StartupRecoverableError('Sudo authentication was cancelled.', {
       message: 'Sudo authentication was cancelled.',
       code: 'loop_devices_fix_cancelled',
-      canFixLoop: true
+      canFixLoop: true,
+      fixKind: 'loop',
+      fixLabel: 'Fix loop devices'
     })
   }
   const cmd = [
@@ -531,6 +562,157 @@ async function fixLoopDevices() {
   await runCommand('sudo', ['bash', '-lc', cmd], { timeoutMs: 30000 })
   await assertLoopDevicesReady()
   emitStartupProgress('check', 45, 'Loop devices are ready')
+}
+
+async function hasFilesystemType(fsType) {
+  const t = String(fsType || '').trim()
+  if (!t) return false
+  const out = await runCommand('bash', ['-lc', `grep -Eq '(^|[[:space:]])${t}([[:space:]]|$)' /proc/filesystems && echo yes || true`], {
+    timeoutMs: 10000
+  }).catch(() => ({ stdout: '' }))
+  return String(out.stdout || '').trim() === 'yes'
+}
+
+async function hasDeviceNode(path) {
+  const p = String(path || '').trim()
+  if (!p) return false
+  const out = await runCommand('bash', ['-lc', `[ -e ${JSON.stringify(p)} ] && echo yes || true`], {
+    timeoutMs: 10000
+  }).catch(() => ({ stdout: '' }))
+  return String(out.stdout || '').trim() === 'yes'
+}
+
+function f2fsMissingMessage() {
+  return [
+    'Required filesystem support is missing on the host kernel: f2fs.',
+    '',
+    'Click "Enable f2fs module" to run:',
+    'sudo modprobe f2fs'
+  ].join('\n')
+}
+
+async function assertF2fsSupportReady() {
+  const hasF2fs = await hasFilesystemType('f2fs')
+  if (hasF2fs) return
+  throw new StartupRecoverableError(f2fsMissingMessage(), {
+    message: f2fsMissingMessage(),
+    code: 'f2fs_missing',
+    canFixF2fs: true,
+    fixKind: 'f2fs',
+    fixLabel: 'Enable f2fs module'
+  })
+}
+
+async function fixF2fsSupport() {
+  emitStartupProgress('check', 35, 'Enabling f2fs kernel module')
+  const canSudo = await commandExists('sudo')
+  if (!canSudo) {
+    throw new StartupRecoverableError('sudo is required to enable f2fs support automatically.', {
+      message: 'sudo is required to enable f2fs support automatically.',
+      code: 'f2fs_fix_failed',
+      canFixF2fs: true,
+      fixKind: 'f2fs',
+      fixLabel: 'Enable f2fs module'
+    })
+  }
+  const authed = await ensureSudoSessionForFix()
+  if (!authed) {
+    throw new StartupRecoverableError('Sudo authentication was cancelled.', {
+      message: 'Sudo authentication was cancelled.',
+      code: 'f2fs_fix_cancelled',
+      canFixF2fs: true,
+      fixKind: 'f2fs',
+      fixLabel: 'Enable f2fs module'
+    })
+  }
+  await runCommand('sudo', ['modprobe', 'f2fs'], { timeoutMs: 20000 })
+  await assertF2fsSupportReady()
+  emitStartupProgress('check', 45, 'f2fs support is ready')
+}
+
+function fuseMissingMessage(missing) {
+  const lines = [
+    'Required FUSE support is missing on the host kernel/runtime.',
+    `Missing: ${missing.join(', ')}`,
+    '',
+    'Click "Enable FUSE support" to run:'
+  ]
+  if (missing.includes('fuse module')) {
+    lines.push('sudo modprobe fuse')
+  }
+  if (missing.includes('/dev/fuse')) {
+    lines.push('sudo mknod -m 666 /dev/fuse c 10 229')
+  }
+  return lines.join('\n')
+}
+
+async function getMissingFuseRequirements() {
+  const missing = []
+  const hasFuseFs = await hasFilesystemType('fuse')
+  if (!hasFuseFs) missing.push('fuse module')
+  const hasFuseNode = await hasDeviceNode('/dev/fuse')
+  if (!hasFuseNode) missing.push('/dev/fuse')
+  return missing
+}
+
+async function assertFuseSupportReady() {
+  const missing = await getMissingFuseRequirements()
+  if (!missing.length) return
+  throw new StartupRecoverableError(fuseMissingMessage(missing), {
+    message: fuseMissingMessage(missing),
+    code: 'fuse_missing',
+    canFixFuse: true,
+    fixKind: 'fuse',
+    fixLabel: 'Enable FUSE support'
+  })
+}
+
+async function fixFuseSupport() {
+  emitStartupProgress('check', 35, 'Enabling FUSE support')
+  const canSudo = await commandExists('sudo')
+  if (!canSudo) {
+    throw new StartupRecoverableError('sudo is required to enable FUSE support automatically.', {
+      message: 'sudo is required to enable FUSE support automatically.',
+      code: 'fuse_fix_failed',
+      canFixFuse: true,
+      fixKind: 'fuse',
+      fixLabel: 'Enable FUSE support'
+    })
+  }
+  const authed = await ensureSudoSessionForFix()
+  if (!authed) {
+    throw new StartupRecoverableError('Sudo authentication was cancelled.', {
+      message: 'Sudo authentication was cancelled.',
+      code: 'fuse_fix_cancelled',
+      canFixFuse: true,
+      fixKind: 'fuse',
+      fixLabel: 'Enable FUSE support'
+    })
+  }
+  await runCommand('sudo', ['modprobe', 'fuse'], { timeoutMs: 20000 }).catch(() => {})
+  const hasFuseNode = await hasDeviceNode('/dev/fuse')
+  if (!hasFuseNode) {
+    await runCommand('sudo', ['mknod', '-m', '666', '/dev/fuse', 'c', '10', '229'], { timeoutMs: 10000 }).catch(() => {})
+  }
+  await assertFuseSupportReady()
+  emitStartupProgress('check', 45, 'FUSE support is ready')
+}
+
+function buildFixHintsFromText(text) {
+  const loopRelated = isLoopRelatedText(text)
+  const f2fsRelated = isF2fsRelatedText(text)
+  const fuseRelated = isFuseRelatedText(text)
+  const fixKind = loopRelated ? 'loop' : (f2fsRelated ? 'f2fs' : (fuseRelated ? 'fuse' : ''))
+  const fixLabel = loopRelated
+    ? 'Fix loop devices'
+    : (f2fsRelated ? 'Enable f2fs module' : (fuseRelated ? 'Enable FUSE support' : ''))
+  return {
+    canFixLoop: loopRelated,
+    canFixF2fs: f2fsRelated,
+    canFixFuse: fuseRelated,
+    fixKind,
+    fixLabel
+  }
 }
 
 function toBytes(value, unit) {
@@ -1236,6 +1418,10 @@ async function startup() {
     await runDocker(['version'])
     emitStartupProgress('check', 70, 'Checking loop devices')
     await assertLoopDevicesReady()
+    emitStartupProgress('check', 75, 'Checking FUSE support')
+    await assertFuseSupportReady()
+    emitStartupProgress('check', 80, 'Checking f2fs support')
+    await assertF2fsSupportReady()
     emitStartupProgress('check', 100, 'Docker is available')
 
     const manifest = loadSeedManifest()
@@ -1262,7 +1448,7 @@ async function startup() {
     const text = `${error.message}\n\n${error.stderr || ''}`.trim()
     emitError({
       message: text,
-      canFixLoop: isLoopRelatedText(text)
+      ...buildFixHintsFromText(text)
     })
     dialog.showErrorBox('Startup failed', text)
   } finally {
@@ -1311,8 +1497,50 @@ ipcMain.handle('startup:fix-loop', async () => {
     const text = `${error.message}\n\n${error.stderr || ''}`.trim()
     emitError({
       message: text,
-      canFixLoop: isLoopRelatedText(text),
+      ...buildFixHintsFromText(text),
       code: 'loop_devices_fix_failed'
+    })
+    return { ok: false, recoverable: false }
+  }
+})
+
+ipcMain.handle('startup:fix-f2fs', async () => {
+  if (startupRunning) return { ok: false, busy: true }
+  try {
+    await fixF2fsSupport()
+    await startup()
+    return { ok: true }
+  } catch (error) {
+    if (error?.recoverable) {
+      emitError(error.payload || { message: error.message || 'f2fs fix failed' })
+      return { ok: false, recoverable: true }
+    }
+    const text = `${error.message}\n\n${error.stderr || ''}`.trim()
+    emitError({
+      message: text,
+      ...buildFixHintsFromText(text),
+      code: 'f2fs_fix_failed'
+    })
+    return { ok: false, recoverable: false }
+  }
+})
+
+ipcMain.handle('startup:fix-fuse', async () => {
+  if (startupRunning) return { ok: false, busy: true }
+  try {
+    await fixFuseSupport()
+    await startup()
+    return { ok: true }
+  } catch (error) {
+    if (error?.recoverable) {
+      emitError(error.payload || { message: error.message || 'FUSE fix failed' })
+      return { ok: false, recoverable: true }
+    }
+    const text = `${error.message}\n\n${error.stderr || ''}`.trim()
+    emitError({
+      message: text,
+      ...buildFixHintsFromText(text),
+      code: 'fuse_fix_failed'
     })
     return { ok: false, recoverable: false }
   }
