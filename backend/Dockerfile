@@ -79,6 +79,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     zip \
     zstd \
     pcre2-utils \
+    jq \
     && rm -rf /var/lib/apt/lists/*
 
 FROM worker-base AS worker
