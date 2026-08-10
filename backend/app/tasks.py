@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
@@ -153,6 +154,8 @@ _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/s", re.IGNORECASE)
 # Credentials are injected into the git command line, and any text carrying that
 # command must never leave this process with them intact: job errors are shown
 # in the interface and stored in the database
+_RE_EXTRACT_LINE = re.compile(r"^\s*-?\s*Extracting\b", re.IGNORECASE)
+
 _RE_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^/\s@]+)@")
 
 
@@ -380,6 +383,8 @@ class _FirmwareProgressTracker:
             line = part.strip()
             if not line:
                 continue
+            if _RE_EXTRACT_LINE.search(line):
+                self.phase = "extract"
             guessed = _guess_fw_key(line, self.known_keys)
             # A job knows which firmwares it touches, so a model named in passing
             # by the environment banner must not steal the bar
@@ -555,6 +560,14 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
             try:
                 last_heartbeat = 0.0
                 while True:
+                    # Silence is normal here: extraction prints nothing for
+                    # minutes, and a read that blocks would freeze the bar with it
+                    if not select.select([proc.stdout.fileno()], [], [], 0.5)[0]:
+                        now = time.time()
+                        if now - last_heartbeat >= 1.0:
+                            tracker.heartbeat()
+                            last_heartbeat = now
+                        continue
                     # Reading from the descriptor hands over whatever is there;
                     # a sized read on the text wrapper waits for a full buffer
                     # and holds sparse output back
@@ -624,6 +637,14 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw
             try:
                 last_heartbeat = 0.0
                 while True:
+                    # Silence is normal here: extraction prints nothing for
+                    # minutes, and a read that blocks would freeze the bar with it
+                    if not select.select([proc.stdout.fileno()], [], [], 0.5)[0]:
+                        now = time.time()
+                        if now - last_heartbeat >= 1.0:
+                            tracker.heartbeat()
+                            last_heartbeat = now
+                        continue
                     # Reading from the descriptor hands over whatever is there;
                     # a sized read on the text wrapper waits for a full buffer
                     # and holds sparse output back
@@ -1273,6 +1294,14 @@ def run_build_job(job_id: str):
             try:
                 last_heartbeat = 0.0
                 while True:
+                    # Silence is normal here: extraction prints nothing for
+                    # minutes, and a read that blocks would freeze the bar with it
+                    if not select.select([proc.stdout.fileno()], [], [], 0.5)[0]:
+                        now = time.time()
+                        if now - last_heartbeat >= 1.0:
+                            tracker.heartbeat()
+                            last_heartbeat = now
+                        continue
                     # Reading from the descriptor hands over whatever is there;
                     # a sized read on the text wrapper waits for a full buffer
                     # and holds sparse output back
