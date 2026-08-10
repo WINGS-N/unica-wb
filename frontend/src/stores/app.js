@@ -758,11 +758,43 @@ export async function loadBuildHints(job) {
 // ---------------------------------------------------------------- logs
 
 let logSocket = null
+// Whether a reader is on the log screen. Survives the socket being reopened for
+// another job, because the reader has not gone anywhere
+let logsWanted = false
+// The tail that arrives first has to land at the end, and the reader has not
+// scrolled anywhere yet to be preserved
+let firstChunk = true
 
 export function closeLogs() {
   if (logSocket && typeof logSocket.close === 'function') logSocket.close()
   logSocket = null
   activeLogJobId.value = ''
+}
+
+function sendToLogSocket(payload) {
+  if (!logSocket || logSocket.readyState !== WebSocket.OPEN) return false
+  logSocket.send(JSON.stringify(payload))
+  return true
+}
+
+/** Start the feed. The socket carries nothing until a reader is on the screen */
+export function attachLogs() {
+  logsWanted = true
+  firstChunk = true
+  sendToLogSocket({ action: 'attach', tail_kb: logTailKb.value })
+}
+
+/** Leave the socket open but silent while the reader is elsewhere */
+export function detachLogs() {
+  logsWanted = false
+  sendToLogSocket({ action: 'detach' })
+}
+
+/** Pins the view to the newest line, whatever the reader was looking at before */
+export async function scrollLogsToBottom() {
+  await nextTick()
+  const el = document.getElementById('logs')
+  if (el) el.scrollTop = el.scrollHeight
 }
 
 export function openLogs(jobId) {
@@ -771,6 +803,10 @@ export function openLogs(jobId) {
   closeLogs()
   activeLogJobId.value = jobId
   logSocket = new WebSocket(buildWsUrl(`/jobs/${jobId}/ws`, { tail_kb: logTailKb.value }))
+  logSocket.onopen = () => {
+    // A reader already on the log screen when the socket opened
+    if (logsWanted) attachLogs()
+  }
   logSocket.onmessage = async (event) => {
     const el = document.getElementById('logs')
     const wasNearBottom = el ? el.scrollHeight - el.scrollTop - el.clientHeight < 24 : true
@@ -804,8 +840,12 @@ export function openLogs(jobId) {
     await nextTick()
     const updated = document.getElementById('logs')
     if (!updated) return
-    if (followLogs.value && wasNearBottom) updated.scrollTop = updated.scrollHeight
-    else updated.scrollTop = Math.max(0, updated.scrollHeight - keepBottomOffset)
+    if (firstChunk || (followLogs.value && wasNearBottom)) {
+      firstChunk = false
+      updated.scrollTop = updated.scrollHeight
+    } else {
+      updated.scrollTop = Math.max(0, updated.scrollHeight - keepBottomOffset)
+    }
   }
   logSocket.onclose = () => {
     logSocket = null
@@ -831,10 +871,12 @@ function ensureSelectedJobLogsAttached() {
 export function setLogTailKb(value) {
   logTailKb.value = Number(value) || 64
   localStorage.setItem(STORAGE_LOG_TAIL_KB, String(logTailKb.value))
-  if (selectedJob.value?.log_path) {
-    logs.value = ''
-    openLogs(selectedJob.value.id)
-  }
+  if (!selectedJob.value?.log_path) return
+  logs.value = ''
+  // The feed restarts from the tail on every attach, so a live socket only
+  // needs to be told the new size
+  if (logSocket && logsWanted) attachLogs()
+  else openLogs(selectedJob.value.id)
 }
 
 export function setFollowLogs(value) {

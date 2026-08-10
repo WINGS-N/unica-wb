@@ -1,4 +1,5 @@
 <script setup>
+import { onMounted, onUnmounted, watch } from 'vue'
 import { CircleHelp, Download } from 'lucide-vue-next'
 import OneuiSelect from '../components/ui/OneuiSelect.vue'
 import ProgressBar from '../components/ui/ProgressBar.vue'
@@ -7,18 +8,33 @@ import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
 import { openOverlay } from '../stores/nav.js'
 import {
+  attachLogs,
   buildProgress,
+  detachLogs,
   followLogs,
   jobTitle,
   logTailKb,
   logs,
   logsPlaceholder,
+  scrollLogsToBottom,
   selectedJob,
   setFollowLogs,
   setLogTailKb
 } from '../stores/app.js'
 
 const tailOptions = [64, 128, 256, 512, 1024].map((x) => ({ value: x, label: `${x} KB` }))
+
+// The feed runs only while this screen is on. Opening a log means wanting its
+// end, and so does switching to another job
+onMounted(() => {
+  attachLogs()
+  scrollLogsToBottom()
+})
+onUnmounted(detachLogs)
+watch(() => selectedJob.value?.id, scrollLogsToBottom)
+watch(followLogs, (on) => {
+  if (on) scrollLogsToBottom()
+})
 
 function openHints() {
   if (!selectedJob.value) return

@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import concurrent.futures
+import contextlib
 import hashlib
 import hmac
 import json
@@ -1989,23 +1990,42 @@ async def repo_delete(mode: str = "repo_only", workspace: str | None = None, db:
     return op_job
 
 
+# Ceiling on one drain pass, so a runaway publisher cannot hold the event loop
+_PUBSUB_DRAIN_LIMIT = 500
+
+# Log tailing polls the file: fast while it grows, lazy once it goes quiet
+_LOG_POLL_MIN_SEC = 0.15
+_LOG_POLL_MAX_SEC = 0.4
+_LOG_POLL_STEP_SEC = 0.05
+_LOG_STATUS_INTERVAL_SEC = 1.0
+
+
 async def _pump_pubsub(websocket: WebSocket, channel: str, snapshot: dict, error_label: str):
     # One shared loop for all three progress streams: send a snapshot, then relay
     # everything published on the channel until the client goes away
     pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+
+    def decode(message):
+        data = message.get("data")
+        try:
+            return json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
+        except Exception:
+            return {"type": "error", "message": error_label}
+
     try:
         await websocket.send_json(snapshot)
         await asyncio.to_thread(pubsub.subscribe, channel)
         while True:
+            # Block for the first message, then take everything already queued
+            # behind it. Publishers burst faster than one message per tick, and
+            # a client that drains slower than that trails a finished build
             message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message.get("data")
-                try:
-                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
-                except Exception:
-                    payload = {"type": "error", "message": error_label}
-                await websocket.send_json(payload)
-            await asyncio.sleep(0.1)
+            drained = 0
+            while message and drained < _PUBSUB_DRAIN_LIMIT:
+                if message.get("type") == "message":
+                    await websocket.send_json(decode(message))
+                drained += 1
+                message = await asyncio.to_thread(pubsub.get_message, timeout=0.0)
     except WebSocketDisconnect:
         pass
     except RuntimeError:
@@ -2524,25 +2544,73 @@ async def stream_logs_ws(websocket: WebSocket, job_id: str, tail_kb: int = 256):
             return
 
         log_path = Path(str(snap.get("log_path") or ""))
-        tail_kb = max(0, min(tail_kb, 4096))
-        pos = await asyncio.to_thread(_tail_log_start_pos, log_path, tail_kb)
-        while True:
-            chunk, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
-            if chunk:
-                await websocket.send_json({"type": "chunk", "chunk": chunk})
+        state = {"tail_kb": max(0, min(tail_kb, 4096))}
+        attached = asyncio.Event()
+        gone = asyncio.Event()
 
-            current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
-            status = str(current.get("status") or "")
+        # The socket stays open while the reader is looking at another screen,
+        # and nothing is tailed until it says it is watching
+        async def take_commands():
+            try:
+                while True:
+                    command = await websocket.receive_json()
+                    action = str(command.get("action") or "")
+                    if action == "attach":
+                        raw = command.get("tail_kb")
+                        if raw is not None:
+                            with contextlib.suppress(TypeError, ValueError):
+                                state["tail_kb"] = max(0, min(int(raw), 4096))
+                        attached.set()
+                    elif action == "detach":
+                        attached.clear()
+            except Exception:
+                gone.set()
+                attached.set()
 
-            if status in _TERMINAL_JOB_STATES:
-                # Drain whatever the process wrote between the last read and exit
-                tail, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
-                if tail:
-                    await websocket.send_json({"type": "chunk", "chunk": tail})
-                await websocket.send_json({"type": "done", "status": status})
-                break
+        commands = asyncio.create_task(take_commands())
+        try:
+            await websocket.send_json({"type": "ready"})
+            while not gone.is_set():
+                await attached.wait()
+                if gone.is_set():
+                    break
 
-            await asyncio.sleep(1)
+                # Each attach starts from the tail: the reader wants the end of
+                # the log, not whatever was current when the socket opened
+                pos = await asyncio.to_thread(_tail_log_start_pos, log_path, state["tail_kb"])
+                delay = _LOG_POLL_MIN_SEC
+                status_at = 0.0
+                while attached.is_set() and not gone.is_set():
+                    chunk, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
+                    if chunk:
+                        await websocket.send_json({"type": "chunk", "chunk": chunk})
+                        # Output comes in bursts, so stay fast while it lasts and
+                        # back off once the process falls quiet
+                        delay = _LOG_POLL_MIN_SEC
+                    else:
+                        delay = min(delay + _LOG_POLL_STEP_SEC, _LOG_POLL_MAX_SEC)
+
+                    # Status lives in the database, and asking for it as often as
+                    # the file is read would cost more than the read itself
+                    now = time.monotonic()
+                    if now - status_at >= _LOG_STATUS_INTERVAL_SEC:
+                        status_at = now
+                        current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
+                        status = str(current.get("status") or "")
+
+                        if status in _TERMINAL_JOB_STATES:
+                            # Drain whatever the process wrote between the last read and exit
+                            tail, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
+                            if tail:
+                                await websocket.send_json({"type": "chunk", "chunk": tail})
+                            await websocket.send_json({"type": "done", "status": status})
+                            return
+
+                    await asyncio.sleep(delay)
+        finally:
+            commands.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await commands
     except WebSocketDisconnect:
         pass
     except RuntimeError:

@@ -1,4 +1,5 @@
 import { execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -25,7 +26,32 @@ function resolveVersion() {
   return pkg.version
 }
 
+// Fingerprint of everything the bundle is built from. A timestamp would
+// change on every run, announcing an update after a rebuild that produced the
+// same bytes; a digest of the inputs moves only when the output can
+function sourceFingerprint() {
+  const roots = ['src', 'public', 'index.html', 'package.json', 'vite.config.js', 'tailwind.config.js']
+  const hash = createHash('md5')
+  const visit = (entry) => {
+    let info
+    try {
+      info = statSync(entry)
+    } catch {
+      return
+    }
+    if (info.isDirectory()) {
+      for (const name of readdirSync(entry).sort()) visit(join(entry, name))
+      return
+    }
+    hash.update(entry)
+    hash.update(readFileSync(entry))
+  }
+  for (const root of roots) visit(root)
+  return hash.digest('hex').slice(0, 7)
+}
+
 const version = resolveVersion()
+const build = `${version}-${sourceFingerprint()}`
 
 const COMPRESSIBLE = /\.(js|mjs|css|html|json|svg|webmanifest|txt|map|ico)$/i
 // Below this the framing overhead eats the win and the request is one packet
@@ -86,7 +112,7 @@ export default defineConfig({
     __APP_VERSION__: JSON.stringify(version),
     // Stamps the service worker url, so a worker is only ever activated for the
     // build that registered it
-    __APP_BUILD__: JSON.stringify(`${version}-${Date.now().toString(36)}`)
+    __APP_BUILD__: JSON.stringify(build)
   },
   server: {
     host: '0.0.0.0',

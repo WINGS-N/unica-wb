@@ -349,9 +349,6 @@
   "licSharpSans": "customized Sharp Sans, (c) 2015 Lucas Sharp - all rights reserved",
   "licenseGroupFonts": "Fonts",
   "licenseFontsHint": "Bundled typography. These are not open source and stay under their own terms",
-  "updateReadyTitle": "Update available",
-  "updateReadyText": "A new build of the interface is ready",
-  "updateReadyAction": "Reload",
   "offlineTitle": "No connection",
   "offlineText": "Showing the last loaded state. Updates resume when the connection is back",
   "backOnline": "Connection restored",
@@ -367,5 +364,6 @@
   "pushUnavailable": "The server has no push key configured",
   "pushUnsupported": "This browser does not support push notifications",
   "pushIosHint": "On iOS notifications work only after the app is added to the home screen",
-  "pushTest": "Send a test"
+  "pushTest": "Send a test",
+  "updateDone": "App updated to"
 }
