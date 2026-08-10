@@ -375,5 +375,5 @@
   "logIsEmpty": "Лог пуст",
   "waitingForOutput": "Ожидание вывода...",
   "serverUnavailableTitle": "Сервер недоступен",
-  "serverUnavailableText": "Бэкенд не отвечает, повторим сами"
+  "serverUnavailableText": "Бэкенд не отвечает, запросы повторяются автоматически"
 }

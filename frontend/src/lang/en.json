@@ -375,5 +375,5 @@
   "logIsEmpty": "The log is empty",
   "waitingForOutput": "Waiting for output...",
   "serverUnavailableTitle": "Server unavailable",
-  "serverUnavailableText": "The backend is not answering, retrying on its own"
+  "serverUnavailableText": "The backend is not answering, requests retry automatically"
 }
