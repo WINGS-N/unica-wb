@@ -182,6 +182,11 @@ _RE_EXTRACT_STEP = re.compile(
 _RE_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^/\s@]+)@")
 
 
+def _sh_dq(value: str) -> str:
+    # Value goes inside a double quoted shell assignment written by sed
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("|", "\\|") + '"'
+
+
 def _redact(text: str) -> str:
     return _RE_URL_CREDENTIALS.sub(r"\1:***@", str(text))
 
@@ -1292,8 +1297,15 @@ def run_build_job(job_id: str):
             override_exports.append(f"export SOURCE_FIRMWARE={shlex.quote(job.source_firmware)}")
         if job.target_firmware:
             override_exports.append(f"export TARGET_FIRMWARE={shlex.quote(job.target_firmware)}")
+        # buildenv generates out/config.sh and everything downstream sources it,
+        # so an exported ROM_VERSION is overwritten before it is ever read. The
+        # generated file is build output, not the checkout, so rewriting it there
+        # neither touches upstream sources nor dirties the tree
+        rewrite_version = ""
         if job.version_major is not None and job.version_minor is not None and job.version_patch is not None:
-            override_exports.append(f"export ROM_VERSION={shlex.quote(rom_version)}")
+            rewrite_version = (
+                "sed -i " + shlex.quote(f"s|^ROM_VERSION=.*|ROM_VERSION={_sh_dq(rom_version)}|") + " out/config.sh"
+            )
 
         if job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
             # Extra mods exist for this one build only:
@@ -1364,6 +1376,8 @@ def run_build_job(job_id: str):
         cmd = f"cd {shlex.quote(str(ctx.root))} && source buildenv.sh {shlex.quote(job.target)} && "
         if override_exports:
             cmd += " && ".join(override_exports) + " && "
+        if rewrite_version:
+            cmd += rewrite_version + " && "
         cmd += f"scripts/make_rom.sh {' '.join(shlex.quote(x) for x in flags)}"
 
         env = os.environ.copy()
