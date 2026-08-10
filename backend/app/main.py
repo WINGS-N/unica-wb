@@ -2537,6 +2537,36 @@ async def download_artifact(job_id: str):
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
 
 
+@app.delete(f"{settings.api_prefix}/jobs/{{job_id}}/artifact")
+async def delete_artifact(job_id: str, kind: str = "rom", db: Session = Depends(get_db)):
+    # Both archives are large enough that keeping them around is a choice, so
+    # each can go without touching the job record itself
+    if kind not in ("rom", "target_files", "both"):
+        raise HTTPException(400, "kind must be rom, target_files or both")
+    job = db.get(BuildJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+
+    columns = {"rom": ("artifact_path",), "target_files": ("target_files_path",)}
+    columns["both"] = columns["rom"] + columns["target_files"]
+
+    removed = []
+    for name in columns[kind]:
+        value = getattr(job, name, None)
+        if not value:
+            continue
+        path = Path(str(value))
+        if path.is_file():
+            await asyncio.to_thread(path.unlink)
+            removed.append(path.name)
+        setattr(job, name, None)
+
+    db.commit()
+    db.refresh(job)
+    publish_job_event(job)
+    return {"removed": removed}
+
+
 @app.get(f"{settings.api_prefix}/artifacts/latest/{{target}}")
 async def download_latest_artifact_for_target(target: str, workspace: str | None = None, db: Session = Depends(get_db)):
     # Latest successful/reused artifact for the target, behind the Latest ZIP button
