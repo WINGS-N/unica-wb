@@ -159,7 +159,10 @@ function latestZipHref() {
           <p class="muted truncate">
             {{ t('downloadedVersion') }}: {{ card.status.downloaded_version || card.status.extracted_version || 'n/a' }}
           </p>
-          <div v-if="!firmwareStatusLoading && !card.status.up_to_date" class="mt-2 flex justify-end">
+          <div
+            v-if="!firmwareStatusLoading && !card.status.up_to_date && !firmwareProgressForStatus(card.status)"
+            class="mt-2 flex justify-end"
+          >
             <SamsungButton
               small
               :loading="firmwareDownloadBusyKind === card.key"

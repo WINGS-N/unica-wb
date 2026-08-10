@@ -1024,7 +1024,12 @@ export function firmwareStatusTone(statusObj) {
   return 'danger'
 }
 
-export const activeRepoProgress = computed(() => repoProgress.value[activeWorkspaceId.value] || null)
+export const activeRepoProgress = computed(() => {
+  const entry = repoProgress.value[activeWorkspaceId.value] || null
+  // The last frame of a finished operation lingers under its ttl, and the card
+  // has nothing to say about work that already ended
+  return entry && entry.status === 'running' ? entry : null
+})
 
 // ---------------------------------------------------------------- firmware
 

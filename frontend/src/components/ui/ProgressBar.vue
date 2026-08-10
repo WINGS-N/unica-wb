@@ -120,12 +120,10 @@ const hasMeta = computed(
       <div class="progress-fill" :class="fillClass" :style="{ width: `${indeterminate ? 38 : pct}%` }" />
     </div>
     <div v-if="hasMeta" class="progress-meta">
-      <span v-if="progress.total_bytes">
-        {{ formatBytes(progress.downloaded_bytes) }} / {{ formatBytes(progress.total_bytes) }}
-      </span>
-      <span v-if="speedBps">{{ t('speedLabel') }}: {{ formatSpeed(speedBps) }}</span>
+      <span>{{ formatBytes(progress.downloaded_bytes) }} / {{ formatBytes(progress.total_bytes) }}</span>
+      <span>{{ t('speedLabel') }}: {{ speedBps ? formatSpeed(speedBps) : 'n/a' }}</span>
       <span>{{ t('elapsedLabel') }}: {{ formatDuration(elapsedSec) }}</span>
-      <span v-if="etaSec">{{ t('etaLabel') }}: {{ formatDuration(etaSec) }}</span>
+      <span>{{ t('etaLabel') }}: {{ etaSec ? formatDuration(etaSec) : 'n/a' }}</span>
     </div>
     <div v-if="progress.message && status === 'running'" class="mt-1 truncate font-mono text-[11px] text-un1ca-muted">
       {{ progress.message }}
