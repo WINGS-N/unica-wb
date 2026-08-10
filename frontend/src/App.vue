@@ -8,6 +8,7 @@ import { Hammer, HardDrive, ListTodo, ScrollText, Settings } from 'lucide-vue-ne
 import WorkspaceBar from './components/WorkspaceBar.vue'
 import ToastHost from './components/ui/ToastHost.vue'
 import ConfirmDialog from './components/ui/ConfirmDialog.vue'
+import IncrementalZipDialog from './components/IncrementalZipDialog.vue'
 import StopJobDialog from './components/StopJobDialog.vue'
 import LoginDialog from './components/LoginDialog.vue'
 
@@ -86,6 +87,7 @@ function onTab(id) {
     <ToastHost />
     <ConfirmDialog />
     <StopJobDialog />
+    <IncrementalZipDialog />
     <LoginDialog />
   </div>
 </template>

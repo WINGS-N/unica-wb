@@ -387,5 +387,11 @@
   "hapticsToggle": "Тактильный отклик",
   "hapticsToggleHint": "Короткий ответ на нажатия, переключатели и результаты",
   "skipTargetFiles": "Без упаковки",
-  "skipTargetFilesHint": "Только сборка, зипы не создаются"
+  "skipTargetFilesHint": "Только сборка, зипы не создаются",
+  "incrementalZip": "Инкрементальный",
+  "incrementalTitle": "Инкрементальный зип",
+  "incrementalHint": "Упаковать разницу с более ранней сборкой того же таргета",
+  "incrementalQueued": "Инкрементальный зип поставлен в очередь",
+  "failedIncremental": "Не удалось собрать инкрементальный зип",
+  "noIncrementalBases": "Нет ранней сборки с архивом target-files"
 }

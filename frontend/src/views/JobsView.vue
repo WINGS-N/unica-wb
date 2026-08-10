@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { CircleHelp, Download, ListChecks, Octagon, Sparkles, Trash2 } from 'lucide-vue-next'
+import { CircleHelp, Download, Layers, ListChecks, Octagon, Sparkles, Trash2 } from 'lucide-vue-next'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import ProgressBar from '../components/ui/ProgressBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -24,6 +24,7 @@ import {
   loadDebloatFromJob,
   loadFFFromJob,
   loadModsFromJob,
+  openIncrementalModal,
   openStopModal,
   parseJobMods,
   parseJobDebloatDisabled,
@@ -122,6 +123,14 @@ function openJobMods(job) {
           <a v-if="job.artifact_path" class="chip-button" :href="downloadUrl(`/jobs/${job.id}/artifact`)" @click.stop>
             <Download :size="14" /> {{ t('downloadZip') }}
           </a>
+          <button
+            v-if="job.status === 'succeeded' && job.target_files_path"
+            type="button"
+            class="chip-button"
+            @click.stop="openIncrementalModal(job)"
+          >
+            <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
           <button v-if="job.status === 'failed'" type="button" class="chip-button" @click.stop="openHints(job)">
             <CircleHelp :size="14" /> {{ t('whyBuildFailed') }}
           </button>

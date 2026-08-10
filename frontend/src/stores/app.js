@@ -1091,6 +1091,48 @@ export async function downloadSamsungFw(kind = 'both') {
   }
 }
 
+export const incrementalBases = ref([])
+export const incrementalBase = ref('')
+export const incrementalBusy = ref(false)
+export const incrementalLoading = ref(false)
+export const incrementalForJob = ref(null)
+
+// Only builds of the same target that still have their target-files archive can
+// serve as a base for the difference
+export async function openIncrementalModal(job) {
+  incrementalForJob.value = job
+  incrementalBases.value = []
+  incrementalBase.value = ''
+  incrementalLoading.value = true
+  try {
+    const data = await apiFetch('/artifacts/target/files', { params: { target: job.target } })
+    incrementalBases.value = (data.items || []).filter((x) => x.job_id !== job.id)
+    incrementalBase.value = incrementalBases.value[0]?.job_id || ''
+  } catch (e) {
+    reportError('failedIncremental', e)
+  } finally {
+    incrementalLoading.value = false
+  }
+}
+
+export async function queueIncrementalZip() {
+  const job = incrementalForJob.value
+  const base = incrementalBase.value
+  if (!job || !base) return
+  incrementalBusy.value = true
+  try {
+    const created = await apiFetch(`/jobs/${job.id}/incremental`, { method: 'POST', params: { base_job_id: base } })
+    incrementalForJob.value = null
+    showToast(t('incrementalQueued'), 'success')
+    await fetchJobs()
+    return created
+  } catch (e) {
+    reportError('failedIncremental', e)
+  } finally {
+    incrementalBusy.value = false
+  }
+}
+
 export async function extractSamsungFwEntry(fwKey) {
   firmwareExtractBusyKey.value = fwKey
   try {

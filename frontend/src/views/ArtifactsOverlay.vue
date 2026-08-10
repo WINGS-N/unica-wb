@@ -1,12 +1,20 @@
 <script setup>
 import { onMounted } from 'vue'
-import { Download } from 'lucide-vue-next'
+import { Download, Layers } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
-import { artifacts, artifactsLoading, fetchArtifacts, formatBytes, formatDateTime, target } from '../stores/app.js'
+import {
+  artifacts,
+  artifactsLoading,
+  fetchArtifacts,
+  formatBytes,
+  formatDateTime,
+  openIncrementalModal,
+  target
+} from '../stores/app.js'
 
 onMounted(fetchArtifacts)
 </script>
@@ -28,12 +36,25 @@ onMounted(fetchArtifacts)
             </p>
             <p class="list-row-meta font-mono">{{ item.job_id }}</p>
             <p class="list-row-meta">{{ formatBytes(item.size_bytes) }} - {{ formatDateTime(item.finished_at) }}</p>
+            <p v-if="item.target_files_exists" class="list-row-meta">
+              target-files: {{ formatBytes(item.target_files_size) }}
+            </p>
           </div>
           <StatusPill v-if="!item.exists" tone="danger" :dot="false">{{ t('artifactMissing') }}</StatusPill>
         </div>
-        <a v-if="item.exists" class="chip-button mt-3" :href="downloadUrl(`/jobs/${item.job_id}/artifact`)">
-          <Download :size="14" /> {{ t('downloadZip') }}
-        </a>
+        <div class="mt-3 flex flex-wrap gap-2">
+          <a v-if="item.exists" class="chip-button" :href="downloadUrl(`/jobs/${item.job_id}/artifact`)">
+            <Download :size="14" /> {{ t('downloadZip') }}
+          </a>
+          <button
+            v-if="item.target_files_exists"
+            type="button"
+            class="chip-button"
+            @click="openIncrementalModal({ id: item.job_id, target: item.target })"
+          >
+            <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+        </div>
       </article>
     </div>
   </OverlayView>

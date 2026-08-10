@@ -387,5 +387,11 @@
   "hapticsToggle": "Vibration feedback",
   "hapticsToggleHint": "Short response to taps, switches and results",
   "skipTargetFiles": "Skip packaging",
-  "skipTargetFilesHint": "Build only, produce no zips at all"
+  "skipTargetFilesHint": "Build only, produce no zips at all",
+  "incrementalZip": "Incremental",
+  "incrementalTitle": "Incremental zip",
+  "incrementalHint": "Pack the difference against an earlier build of the same target",
+  "incrementalQueued": "Incremental zip queued",
+  "failedIncremental": "Incremental zip failed",
+  "noIncrementalBases": "No earlier build with a target-files archive"
 }
