@@ -373,5 +373,7 @@
   "notDownloaded": "Не скачано",
   "noLogForJob": "Задача не оставила лога",
   "logIsEmpty": "Лог пуст",
-  "waitingForOutput": "Ожидание вывода..."
+  "waitingForOutput": "Ожидание вывода...",
+  "serverUnavailableTitle": "Сервер недоступен",
+  "serverUnavailableText": "Бэкенд не отвечает, повторим сами"
 }

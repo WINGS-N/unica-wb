@@ -183,6 +183,15 @@ function reportError(key, error) {
   // request that happened to be in flight
   if (error instanceof ApiError && error.offline) return
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return
+  // A restarting backend fails every section at once, and one banner about the
+  // backend beats a stack of identical complaints about each of them
+  if (error instanceof ApiError && error.unavailable) {
+    showToast(t('serverUnavailableText'), 'error', 0, {
+      id: 'connectivity',
+      title: t('serverUnavailableTitle')
+    })
+    return
+  }
   showToast(`${t(key)}: ${error?.message || error}`, 'error')
 }
 
@@ -781,6 +790,13 @@ function sendToLogSocket(payload) {
 export function attachLogs() {
   logsWanted = true
   firstChunk = true
+  const jobId = selectedJob.value?.id
+  // Opening the screen must not depend on a socket somebody else opened first:
+  // without one there is nothing to attach to and the log waits forever
+  if (jobId && (!logSocket || activeLogJobId.value !== jobId)) {
+    openLogs(jobId)
+    return
+  }
   sendToLogSocket({ action: 'attach', tail_kb: logTailKb.value })
 }
 

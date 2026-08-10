@@ -373,5 +373,7 @@
   "notDownloaded": "Not downloaded",
   "noLogForJob": "This job left no log",
   "logIsEmpty": "The log is empty",
-  "waitingForOutput": "Waiting for output..."
+  "waitingForOutput": "Waiting for output...",
+  "serverUnavailableTitle": "Server unavailable",
+  "serverUnavailableText": "The backend is not answering, retrying on its own"
 }

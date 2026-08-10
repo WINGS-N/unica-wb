@@ -50,10 +50,15 @@ export function downloadUrl(path, params = {}, options = {}) {
   return `${url}${sep}token=${encodeURIComponent(authToken.value)}`
 }
 
+// A proxy in front of the api answers with these while it has nothing to talk
+// to, which is a state of the whole backend rather than of one request
+const UNAVAILABLE_STATUSES = new Set([502, 503, 504])
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message)
     this.status = status
+    this.unavailable = UNAVAILABLE_STATUSES.has(status)
     // status 0 means the request never reached the server: offline, DNS, a
     // dropped connection. Those are a connectivity state, not a failure worth
     // reporting once per request
@@ -65,9 +70,11 @@ async function readError(response) {
   const raw = await response.text()
   try {
     const parsed = JSON.parse(raw)
-    return String(parsed.detail || parsed.message || raw)
+    return String(parsed.detail || parsed.message || `HTTP ${response.status}`)
   } catch {
-    return raw || `HTTP ${response.status}`
+    // Anything the api did not write is a proxy error page: it is html, it is
+    // long, and it says nothing a status code does not
+    return `HTTP ${response.status}`
   }
 }
 

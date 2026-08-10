@@ -62,6 +62,23 @@ watch(
 
 onUnmounted(() => clearInterval(ticker))
 
+// Not every line carries a speed, and dropping the field on the lines that do
+// not made the row jump between one shape and another
+const lastSpeed = ref(0)
+watch(
+  () => props.progress?.speed_bps,
+  (value) => {
+    if (value) lastSpeed.value = Number(value)
+  },
+  { immediate: true }
+)
+watch(
+  () => props.progress?.job_id,
+  () => (lastSpeed.value = 0)
+)
+
+const speedBps = computed(() => (status.value === 'running' ? lastSpeed.value : 0))
+
 const sinceUpdate = computed(() => Math.max(0, Math.floor((now.value - receivedAt.value) / 1000)))
 
 const elapsedSec = computed(() => {
@@ -78,7 +95,7 @@ const etaSec = computed(() => {
 const hasMeta = computed(
   () =>
     status.value === 'running' &&
-    (props.progress?.speed_bps || props.progress?.elapsed_sec || props.progress?.eta_sec || props.progress?.total_bytes)
+    (speedBps.value || props.progress?.elapsed_sec || props.progress?.eta_sec || props.progress?.total_bytes)
 )
 </script>
 
@@ -106,7 +123,7 @@ const hasMeta = computed(
       <span v-if="progress.total_bytes">
         {{ formatBytes(progress.downloaded_bytes) }} / {{ formatBytes(progress.total_bytes) }}
       </span>
-      <span v-if="progress.speed_bps">{{ t('speedLabel') }}: {{ formatSpeed(progress.speed_bps) }}</span>
+      <span v-if="speedBps">{{ t('speedLabel') }}: {{ formatSpeed(speedBps) }}</span>
       <span>{{ t('elapsedLabel') }}: {{ formatDuration(elapsedSec) }}</span>
       <span v-if="etaSec">{{ t('etaLabel') }}: {{ formatDuration(etaSec) }}</span>
     </div>
