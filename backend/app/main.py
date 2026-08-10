@@ -21,7 +21,6 @@ from urllib.request import urlopen
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from redis.exceptions import RedisError
 from sqlalchemy import desc, text
 from sqlalchemy.orm import Session
 
@@ -1305,10 +1304,8 @@ def _readyz_impl() -> dict:
 
 @app.get(f"{settings.api_prefix}/healthz")
 async def healthz():
-    try:
-        await asyncio.to_thread(redis_conn.ping)
-    except RedisError as exc:
-        return JSONResponse(status_code=503, content={"status": "down", "redis": str(exc)})
+    # Liveness only. Dependency state belongs in readyz: a check that goes
+    # through the thread pool reports a busy process as a dead one
     return {"status": "ok"}
 
 

@@ -9,6 +9,7 @@ import shutil
 import signal
 import subprocess
 import time
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -721,9 +722,9 @@ def run_repo_clone_job(job_id: str, fresh: bool = False):
             with log_file.open("ab") as lf:
                 lf.write(f"[repo] remote changed ({existing_origin} -> {safe_url}), full clone required\n".encode())
 
-        staging = ws_lib.workspaces_root() / f".clone-{job_id}"
-        if staging.exists():
-            shutil.rmtree(staging, ignore_errors=True)
+        # The suffix is per attempt, not per job, so a retry never lands in a
+        # directory an earlier attempt is still writing to
+        staging = ws_lib.workspaces_root() / f".clone-{job_id}-{uuid.uuid4().hex[:8]}"
         staging.parent.mkdir(parents=True, exist_ok=True)
         try:
             tracker = _GitProgressTracker(ctx.id, "clone", f"Clone {safe_url}", base=0, span=70)

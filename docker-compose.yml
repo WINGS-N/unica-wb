@@ -32,7 +32,7 @@ services:
       - shared-data:/data
       - un1ca-src:/workspace
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/healthz"]
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/v1/readyz"]
       interval: 20s
       timeout: 5s
       retries: 5

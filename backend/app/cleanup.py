@@ -1,9 +1,23 @@
 import shutil
+import time
 from pathlib import Path
 
 from . import workspaces as ws_lib
 from .config import settings
 from .database import SessionLocal
+
+# A clone writes constantly, so anything touched recently is a live attempt
+STALE_CLONE_AGE_SEC = 600
+
+
+def _newest_mtime(path: Path) -> float:
+    newest = path.stat().st_mtime
+    for child in path.rglob("*"):
+        try:
+            newest = max(newest, child.stat().st_mtime)
+        except OSError:
+            continue
+    return newest
 
 
 def cleanup_stale_build_overrides() -> dict[str, int]:
@@ -43,10 +57,17 @@ def cleanup_stale_build_overrides() -> dict[str, int]:
                 item.unlink(missing_ok=True)
             cleaned["tmp_extra_mods_dirs"] += 1
 
-    # A worker killed mid-clone leaves a .clone-<job> staging tree behind
+    # A worker killed mid-clone leaves a .clone-<job> staging tree behind.
+    # The age guard spares a tree another process is still cloning into
     workspaces_root = ws_lib.workspaces_root()
     if workspaces_root.is_dir():
+        cutoff = time.time() - STALE_CLONE_AGE_SEC
         for item in workspaces_root.glob(".clone-*"):
+            try:
+                if _newest_mtime(item) > cutoff:
+                    continue
+            except OSError:
+                continue
             shutil.rmtree(item, ignore_errors=True)
             cleaned["stale_clone_dirs"] += 1
 
