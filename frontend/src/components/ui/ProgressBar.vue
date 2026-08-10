@@ -62,19 +62,34 @@ watch(
 
 onUnmounted(() => clearInterval(ticker))
 
-// Not every line carries a speed, and dropping the field on the lines that do
-// not made the row jump between one shape and another
-const lastSpeed = ref(0)
-watch(
-  () => props.progress?.speed_bps,
-  (value) => {
-    if (value) lastSpeed.value = Number(value)
-  },
-  { immediate: true }
-)
+// A progress line carries whatever the tool printed on it: one has a speed, the
+// next only a percentage. Holding the last real value keeps a field from
+// blinking between a number and nothing
+function sticky(read) {
+  const held = ref(0)
+  watch(
+    read,
+    (value) => {
+      if (Number(value)) held.value = Number(value)
+    },
+    { immediate: true }
+  )
+  return held
+}
+
+const lastSpeed = sticky(() => props.progress?.speed_bps)
+const lastEta = sticky(() => props.progress?.eta_sec)
+const lastDone = sticky(() => props.progress?.downloaded_bytes)
+const lastTotal = sticky(() => props.progress?.total_bytes)
+
 watch(
   () => props.progress?.job_id,
-  () => (lastSpeed.value = 0)
+  () => {
+    lastSpeed.value = 0
+    lastEta.value = 0
+    lastDone.value = 0
+    lastTotal.value = 0
+  }
 )
 
 const speedBps = computed(() => (status.value === 'running' ? lastSpeed.value : 0))
@@ -87,15 +102,14 @@ const elapsedSec = computed(() => {
 })
 
 const etaSec = computed(() => {
-  const base = Number(props.progress?.eta_sec ?? 0)
+  const base = lastEta.value
   if (!base) return 0
   return status.value === 'running' ? Math.max(0, base - sinceUpdate.value) : base
 })
 
 const hasMeta = computed(
   () =>
-    status.value === 'running' &&
-    (speedBps.value || props.progress?.elapsed_sec || props.progress?.eta_sec || props.progress?.total_bytes)
+    status.value === 'running' && (speedBps.value || props.progress?.elapsed_sec || lastEta.value || lastTotal.value)
 )
 </script>
 
@@ -120,7 +134,7 @@ const hasMeta = computed(
       <div class="progress-fill" :class="fillClass" :style="{ width: `${indeterminate ? 38 : pct}%` }" />
     </div>
     <div v-if="hasMeta" class="progress-meta">
-      <span>{{ formatBytes(progress.downloaded_bytes) }} / {{ formatBytes(progress.total_bytes) }}</span>
+      <span>{{ lastTotal ? `${formatBytes(lastDone)} / ${formatBytes(lastTotal)}` : 'n/a' }}</span>
       <span>{{ t('speedLabel') }}: {{ speedBps ? formatSpeed(speedBps) : 'n/a' }}</span>
       <span>{{ t('elapsedLabel') }}: {{ formatDuration(elapsedSec) }}</span>
       <span>{{ t('etaLabel') }}: {{ etaSec ? formatDuration(etaSec) : 'n/a' }}</span>
