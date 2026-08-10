@@ -131,6 +131,9 @@ _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 # make_rom.sh announces every step with LOG_STEP_IN; those banners are the only
 # reliable progress signal a shell build gives us. Percentages are the share of
 # wall-clock a full build spends before that step, measured on a cold tree
+# Stages during which the firmware card still has something to say
+_FIRMWARE_BUILD_STAGES = {"dependencies", "download", "extract"}
+
 _BUILD_STAGE_RULES = [
     # A first run compiles the toolchain before anything else happens, and that
     # is the longest silent stretch of the whole build
@@ -455,9 +458,14 @@ class _FirmwareProgressTracker:
         self.phase = phase
         self.step = ""
         self.probe = _WrittenBytesProbe(watch_path) if watch_path else None
+        # Once settled the entry is final: a later heartbeat would put it back
+        # into a running state it already left
+        self.done = False
 
     def feed(self, text: str):
         # Fed with raw stdout/stderr chunks; the split on \r and \n happens here
+        if self.done:
+            return
         for part in re.split(r"[\r\n]+", text):
             line = part.strip()
             if not line:
@@ -509,6 +517,8 @@ class _FirmwareProgressTracker:
 
     def heartbeat(self):
         # Heartbeat keeps the bar alive while extract prints no percentage at all
+        if self.done:
+            return
         targets = self.started_keys or set(self.known_keys)
         now = time.time()
         written = {}
@@ -519,6 +529,9 @@ class _FirmwareProgressTracker:
         for key in targets:
             self._started_at.setdefault(key, now)
             last_pct = self._last_emit.get(key, (0, 0.0))[0]
+            # The step names one firmware, so showing it on the other card would
+            # claim work that is not happening there
+            step = self.step if (not self.current_key or key == self.current_key) else ""
             set_progress(
                 self.scope,
                 key,
@@ -529,13 +542,16 @@ class _FirmwareProgressTracker:
                     "job_id": self.job_id,
                     "percent": max(0, last_pct),
                     "indeterminate": last_pct <= 0,
-                    "message": self.step,
+                    "message": step,
                     "elapsed_sec": int(now - self._started_at[key]),
                     **written,
                 },
             )
 
     def finalize(self, ok: bool, status: str | None = None):
+        if self.done:
+            return
+        self.done = True
         # Settle the entry as completed/failed; terminal entries
         # get a short TTL in Redis so they cannot resurrect after a reload
         targets = sorted(self.started_keys or set(self.known_keys))
@@ -1391,6 +1407,7 @@ def run_build_job(job_id: str):
                     "workspace_id": ctx.id,
                 },
             )
+            fw_done = False
             try:
                 last_heartbeat = 0.0
                 while True:
@@ -1419,6 +1436,11 @@ def run_build_job(job_id: str):
                         for stage, pct, pattern in _BUILD_STAGE_RULES:
                             if not pattern.search(text):
                                 continue
+                            # Past the work dir the firmware is done with, and its
+                            # card should stop showing a bar for the rest of the build
+                            if stage not in _FIRMWARE_BUILD_STAGES and not fw_done:
+                                fw_done = True
+                                tracker.finalize(True)
                             if pct >= current_pct:
                                 current_stage = stage
                                 current_pct = pct

@@ -377,5 +377,9 @@
   "serverUnavailableTitle": "Сервер недоступен",
   "serverUnavailableText": "Бэкенд не отвечает, запросы повторяются автоматически",
   "decryptProgressLabel": "Расшифровка",
-  "verifyProgressLabel": "Проверка"
+  "verifyProgressLabel": "Проверка",
+  "dropArchiveHere": "Перетащите архив сюда",
+  "dropArchiveHint": "или выберите файл, только для одной сборки",
+  "archiveReady": "Готов к загрузке",
+  "modsEnabledShort": "Включено"
 }

@@ -377,5 +377,9 @@
   "serverUnavailableTitle": "Server unavailable",
   "serverUnavailableText": "The backend is not answering, requests retry automatically",
   "decryptProgressLabel": "Decrypting",
-  "verifyProgressLabel": "Verifying"
+  "verifyProgressLabel": "Verifying",
+  "dropArchiveHere": "Drop the archive here",
+  "dropArchiveHint": "or pick a file, one build only",
+  "archiveReady": "Ready to upload",
+  "modsEnabledShort": "Enabled"
 }

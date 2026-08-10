@@ -114,6 +114,18 @@ export const uploadBusy = ref(false)
 export const uploadError = ref('')
 export const uploadedMods = ref([])
 export const uploadedModsId = ref('')
+// Uploaded modules land in unica/mods for one build, which is the same place the
+// disable mechanism scans, so turning one off needs nothing but its directory
+export const uploadedModsDisabled = ref([])
+
+export function toggleUploadedMod(moduleDir) {
+  const key = String(moduleDir || '')
+  if (!key) return
+  const current = new Set(uploadedModsDisabled.value)
+  if (current.has(key)) current.delete(key)
+  else current.add(key)
+  uploadedModsDisabled.value = [...current]
+}
 
 export const artifacts = ref([])
 export const artifactsLoading = ref(false)
@@ -413,6 +425,7 @@ export async function selectWorkspace(id) {
   ffOverrides.value = {}
   uploadedModsId.value = ''
   uploadedMods.value = []
+  uploadedModsDisabled.value = []
   artifacts.value = []
   samsungFwItems.value = []
   fwScope.value = workspaces.value.find((x) => x.id === id)?.fw_scope || 'shared'
@@ -679,7 +692,7 @@ export async function submitJob() {
         version_patch: Number(versionPatch.value),
         version_suffix: versionSuffix.value || null,
         extra_mods_upload_id: uploadedModsId.value || null,
-        mods_disabled: modsTouched.value ? modsDisabledIds.value : null,
+        mods_disabled: buildModsDisabled(),
         debloat_disabled: debloatDisabledIds.value,
         debloat_add_system: pathsTextToList(debloatAddSystemText.value),
         debloat_add_product: pathsTextToList(debloatAddProductText.value),
@@ -1234,6 +1247,20 @@ export async function loadFFFromJob(job) {
 
 // ---------------------------------------------------------------- uploads
 
+// Repo mods and uploaded mods share one list: both are directories under
+// unica/mods by the time the build applies them
+function buildModsDisabled() {
+  const repo = modsTouched.value ? modsDisabledIds.value : []
+  const merged = [...repo, ...uploadedModsDisabled.value]
+  if (!merged.length) return modsTouched.value ? [] : null
+  return [...new Set(merged)]
+}
+
+export function setUploadFile(file) {
+  uploadFile.value = file || null
+  uploadError.value = ''
+}
+
 export function onUploadFileChanged(event) {
   uploadFile.value = event?.target?.files?.[0] || null
   uploadError.value = ''
@@ -1262,6 +1289,7 @@ export async function uploadModsArchive() {
 export function clearUploadedMods() {
   uploadedModsId.value = ''
   uploadedMods.value = []
+  uploadedModsDisabled.value = []
   uploadFile.value = null
 }
 

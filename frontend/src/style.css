@@ -276,6 +276,14 @@
 
   /* Firmware versions are one long token with no spaces, and a mobile card is
      narrower than they are */
+  .dropzone {
+    @apply flex cursor-pointer items-center gap-3 rounded-3xl border border-dashed border-un1ca-border bg-un1ca-surface p-4 transition-colors;
+  }
+
+  .dropzone.is-dragging {
+    @apply border-un1ca-accent bg-white/[0.04];
+  }
+
   .wrap-anywhere {
     overflow-wrap: anywhere;
     word-break: break-word;
