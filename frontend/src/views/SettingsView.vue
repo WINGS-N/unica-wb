@@ -24,6 +24,7 @@ import {
   refreshPushState,
   sendTestPush
 } from '../stores/push.js'
+import { hapticsEnabled, hapticsSupported, setHapticsEnabled } from '../stores/haptics.js'
 import {
   activeWorkspace,
   advancedLoading,
@@ -141,6 +142,18 @@ onBeforeUnmount(unwatchResources)
 
     <SectionCard :title="t('language')">
       <OneuiSelect block :model-value="language" :options="languageOptions" @change="setLanguage" />
+    </SectionCard>
+
+    <SectionCard v-if="hapticsSupported" :title="t('hapticsTitle')" :subtitle="t('hapticsHint')">
+      <div class="form-section">
+        <div class="form-row">
+          <div class="min-w-0">
+            <p class="form-label">{{ t('hapticsToggle') }}</p>
+            <p class="form-hint">{{ t('hapticsToggleHint') }}</p>
+          </div>
+          <OneuiSwitch :model-value="hapticsEnabled" @update:model-value="setHapticsEnabled" />
+        </div>
+      </div>
     </SectionCard>
 
     <SectionCard :title="t('notificationsTitle')" :subtitle="t('notificationsHint')">

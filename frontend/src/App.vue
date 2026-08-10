@@ -1,4 +1,5 @@
 <script setup>
+import { haptic } from './stores/haptics.js'
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Hammer, HardDrive, ListTodo, ScrollText, Settings } from 'lucide-vue-next'
@@ -39,6 +40,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKey)
   stopApp()
 })
+
+function onTab(id) {
+  haptic('select')
+  goTab(id)
+}
 </script>
 
 <template>
@@ -64,7 +70,7 @@ onBeforeUnmount(() => {
           type="button"
           class="app-nav-item"
           :class="{ 'is-active': tab.id === currentTab }"
-          @click="goTab(tab.id)"
+          @click="onTab(tab.id)"
         >
           <span class="relative">
             <component :is="tab.icon" :size="21" :stroke-width="tab.id === currentTab ? 2.4 : 1.9" />

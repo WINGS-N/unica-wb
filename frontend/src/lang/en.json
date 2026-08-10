@@ -381,5 +381,9 @@
   "dropArchiveHere": "Drop the archive here",
   "dropArchiveHint": "or pick a file, one build only",
   "archiveReady": "Ready to upload",
-  "modsEnabledShort": "Enabled"
+  "modsEnabledShort": "Enabled",
+  "hapticsTitle": "Haptics",
+  "hapticsHint": "Vibration feedback on touch",
+  "hapticsToggle": "Vibration feedback",
+  "hapticsToggleHint": "Short response to taps, switches and results"
 }

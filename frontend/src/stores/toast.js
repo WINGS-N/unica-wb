@@ -1,4 +1,7 @@
 import { ref } from 'vue'
+import { haptic } from './haptics.js'
+
+const HAPTIC_BY_TYPE = { error: 'error', warning: 'warning', success: 'success' }
 
 export const toasts = ref([])
 
@@ -9,6 +12,7 @@ let seq = 0
 export function showToast(message, type = 'info', duration = 4500, options = {}) {
   const text = String(message ?? '').trim()
   if (!text) return ''
+  haptic(HAPTIC_BY_TYPE[type] || 'tap')
   const id = options.id || `${Date.now()}-${++seq}`
   const entry = { id, message: text, type, duration, title: options.title || '', actions: options.actions || [] }
   // A repeat of the same id replaces the toast instead of stacking a twin

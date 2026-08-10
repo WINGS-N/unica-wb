@@ -381,5 +381,9 @@
   "dropArchiveHere": "Перетащите архив сюда",
   "dropArchiveHint": "или выберите файл, только для одной сборки",
   "archiveReady": "Готов к загрузке",
-  "modsEnabledShort": "Включено"
+  "modsEnabledShort": "Включено",
+  "hapticsTitle": "Вибрация",
+  "hapticsHint": "Тактильный отклик при касании",
+  "hapticsToggle": "Тактильный отклик",
+  "hapticsToggleHint": "Короткий ответ на нажатия, переключатели и результаты"
 }
