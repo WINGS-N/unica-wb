@@ -590,8 +590,15 @@
     animation: progress-slide 1.25s ease-in-out infinite;
   }
 
+  /* A fixed grid, not a wrapping row: the numbers change width constantly and
+     with flex-wrap the fields kept migrating between lines */
   .progress-meta {
-    @apply mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-un1ca-muted;
+    @apply mt-1 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px] text-un1ca-muted;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .progress-meta > span {
+    @apply truncate;
   }
 
   /* =====================================================================
