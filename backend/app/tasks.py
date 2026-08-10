@@ -372,9 +372,63 @@ def _stream_command_with_progress(
     return rc
 
 
+class _WrittenBytesProbe:
+    # Extraction prints no numbers, so the only real measure is what lands on
+    # disk. Sampling the output tree gives volume and throughput the same way a
+    # pipe meter does, without inventing a percentage nobody can compute
+    def __init__(self, path: Path):
+        self.path = path
+        self._at = 0.0
+        self._bytes = 0
+        self._speed = 0.0
+        self._cost = 0.0
+
+    def _measure(self) -> int:
+        total = 0
+        seen = 0
+        for root, _dirs, files in os.walk(self.path, onerror=lambda _e: None):
+            for name in files:
+                try:
+                    total += os.lstat(os.path.join(root, name)).st_size
+                except OSError:
+                    continue
+                seen += 1
+                if seen >= 60000:
+                    return total
+        return total
+
+    def sample(self) -> tuple[int, int]:
+        now = time.monotonic()
+        # A walk over a big tree is not free, so the interval grows with the
+        # time the previous one took
+        interval = max(1.0, min(15.0, self._cost * 20))
+        if self._at and now - self._at < interval:
+            return self._bytes, int(self._speed)
+        started = time.monotonic()
+        try:
+            total = self._measure()
+        except OSError:
+            return self._bytes, int(self._speed)
+        self._cost = time.monotonic() - started
+        if self._at:
+            span = now - self._at
+            if span > 0 and total >= self._bytes:
+                self._speed = (total - self._bytes) / span
+        self._at = now
+        self._bytes = total
+        return self._bytes, int(self._speed)
+
+
 class _FirmwareProgressTracker:
     # Publishes progress to Redis for the websocket UI, with a heartbeat for silent logs
-    def __init__(self, job_id: str, scope: str, known_keys: list[str], phase: str = "download"):
+    def __init__(
+        self,
+        job_id: str,
+        scope: str,
+        known_keys: list[str],
+        phase: str = "download",
+        watch_path: Path | None = None,
+    ):
         self.job_id = job_id
         self.scope = scope
         self.known_keys = [x for x in known_keys if x]
@@ -384,6 +438,7 @@ class _FirmwareProgressTracker:
         self._started_at: dict[str, float] = {}
         self.phase = phase
         self.step = ""
+        self.probe = _WrittenBytesProbe(watch_path) if watch_path else None
 
     def feed(self, text: str):
         # Fed with raw stdout/stderr chunks; the split on \r and \n happens here
@@ -432,6 +487,11 @@ class _FirmwareProgressTracker:
         # Heartbeat keeps the bar alive while extract prints no percentage at all
         targets = self.started_keys or set(self.known_keys)
         now = time.time()
+        written = {}
+        if self.probe:
+            total, speed = self.probe.sample()
+            if total:
+                written = {"downloaded_bytes": total, "speed_bps": speed}
         for key in targets:
             self._started_at.setdefault(key, now)
             last_pct = self._last_emit.get(key, (0, 0.0))[0]
@@ -447,6 +507,7 @@ class _FirmwareProgressTracker:
                     "indeterminate": last_pct <= 0,
                     "message": self.step,
                     "elapsed_sec": int(now - self._started_at[key]),
+                    **written,
                 },
             )
 
@@ -552,7 +613,7 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
         fw_dir = ctx.out / "fw" / fw_key
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, [fw_key.upper()], phase="extract")
+        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, [fw_key.upper()], phase="extract", watch_path=fw_dir)
         tracker.heartbeat()
         with log_file.open("ab") as lf:
             lf.write(f"[extract] fw_key={fw_key} target={target_codename}\n".encode())
@@ -629,7 +690,9 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw
         odin_dir = ctx.out / "odin"
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, list(fw_keys or []), phase="download")
+        tracker = _FirmwareProgressTracker(
+            job_id, ctx.fw_scope, list(fw_keys or []), phase="download", watch_path=ctx.out / "fw"
+        )
         tracker.heartbeat()
         with log_file.open("ab") as lf:
             lf.write(f"[download] target={target_codename} kind={kind}\n".encode())
