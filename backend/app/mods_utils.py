@@ -42,7 +42,9 @@ def parse_unica_mod_entries(unica_root: Path) -> list[dict[str, str | bool]]:
     return entries
 
 
-def apply_mods_disabled_overrides(unica_root: Path, disabled_ids: list[str]) -> dict[str, list[Path | tuple[Path, Path]]] | None:
+def apply_mods_disabled_overrides(
+    unica_root: Path, disabled_ids: list[str]
+) -> dict[str, list[Path | tuple[Path, Path]]] | None:
     mods_dir = unica_root / "unica" / "mods"
     if not mods_dir.exists():
         return None

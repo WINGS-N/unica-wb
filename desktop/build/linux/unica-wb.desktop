@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=UN1CA Build
+Comment=Build UN1CA firmware
+Exec=unica-wb
+Icon=unica-wb
+Terminal=false
+Categories=Development;
+StartupNotify=true

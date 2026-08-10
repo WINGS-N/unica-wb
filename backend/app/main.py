@@ -1,35 +1,47 @@
 import asyncio
-import logging
 import base64
 import concurrent.futures
-import os
 import hashlib
 import hmac
 import json
+import logging
+import os
 import re
 import secrets
-import shlex
 import shutil
 import subprocess
 import time
 import uuid
 from collections import OrderedDict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from redis.exceptions import RedisError
 from sqlalchemy import desc, text
 from sqlalchemy.orm import Session
 
-from .config import settings
+from . import push as push_service
+from . import workspaces as ws_lib
+from .avatars import AvatarError, get_avatar
+from .build_progress import (
+    PROGRESS_CHANNEL as BUILD_PROGRESS_CHANNEL,
+)
+from .build_progress import (
+    clear_progress as clear_build_progress,
+)
+from .build_progress import (
+    list_progress as list_build_progress,
+)
 from .cleanup import cleanup_stale_build_overrides
+from .config import settings
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
+from .error_hints import detect_build_hints
 from .ff_utils import (
     apply_custom_features,
     is_boolean_feature,
@@ -41,9 +53,10 @@ from .ff_utils import (
     parse_shell_assignments,
     parse_shell_vars,
 )
-from .error_hints import detect_build_hints
-from .mods_utils import parse_unica_mod_entries
-from .firmware_progress import PROGRESS_CHANNEL, clear_progress, list_progress
+from .firmware_progress import PROGRESS_CHANNEL, clear_progress, list_progress, progress_key
+from .job_events import EVENTS_CHANNEL as JOB_EVENTS_CHANNEL
+from .job_events import publish as publish_job_event
+from .models import AppSetting, BuildJob, PushSubscription, Workspace
 from .mods_archive import (
     ModsArchiveError,
     load_upload_meta,
@@ -52,17 +65,24 @@ from .mods_archive import (
     upload_archive_path,
     validate_mods_archive,
 )
-from .models import AppSetting, BuildJob
+from .mods_utils import parse_unica_mod_entries
 from .queue import ARQ_QUEUE_BUILDS, ARQ_QUEUE_CONTROLS, close_arq_pool, get_arq_pool, redis_conn
 from .repo_progress import PROGRESS_CHANNEL as REPO_PROGRESS_CHANNEL
 from .repo_progress import clear_progress as clear_repo_progress
 from .repo_progress import get_progress as get_repo_progress
-from .schemas import BuildJobCreate, BuildJobRead, RepoConfigUpdate, StopJobRequest, AdvancedSettingsUpdate
-from .build_progress import (
-    PROGRESS_CHANNEL as BUILD_PROGRESS_CHANNEL,
-    list_progress as list_build_progress,
-    remove_progress as remove_build_progress,
+from .repo_progress import list_progress as list_repo_progress
+from .schemas import (
+    AdvancedSettingsUpdate,
+    BuildJobCreate,
+    BuildJobRead,
+    PushSubscriptionCreate,
+    PushSubscriptionDelete,
+    RepoConfigUpdate,
+    StopJobRequest,
+    WorkspaceCreate,
+    WorkspaceUpdate,
 )
+from .workspaces import WorkspaceRef
 
 app = FastAPI(title=settings.app_name)
 logger = logging.getLogger(__name__)
@@ -76,11 +96,36 @@ _DIR_SIZE_TTL_SEC = 1200.0
 _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 _DIR_STATS_KEY = "un1ca:cache:dir_size:stats"
 _REPO_INFO_TTL_SEC = 30.0
-_REPO_INFO_KEY = "un1ca:cache:repo_info:v1"
+_REPO_INFO_KEY_PREFIX = "un1ca:cache:repo_info:v2:"
 _GIT_SNAPSHOT_TTL_SEC = 30.0
-_GIT_SNAPSHOT_KEY = "un1ca:cache:git_snapshot:v1"
+_GIT_SNAPSHOT_KEY_PREFIX = "un1ca:cache:git_snapshot:v2:"
 _HTTP_METRICS_PREFIX = "un1ca:metrics:http:"
 _HTTP_LAT_BUCKETS_MS = [10, 25, 50, 100, 200, 350, 500, 750, 1000, 2000, 5000]
+_AVATAR_BROWSER_TTL_SEC = 3600.0
+
+
+_AUTH_CACHE_TTL_SEC = 5.0
+_auth_cache: tuple[float, str] = (0.0, "")
+
+
+def _auth_secret_cached() -> str:
+    global _auth_cache
+    now = time.time()
+    cached_at, secret = _auth_cache
+    if now - cached_at <= _AUTH_CACHE_TTL_SEC:
+        return secret
+    db = SessionLocal()
+    try:
+        secret = _get_auth_secret(db) if _auth_enabled(db) else ""
+    finally:
+        db.close()
+    _auth_cache = (now, secret)
+    return secret
+
+
+def _invalidate_auth_cache():
+    global _auth_cache
+    _auth_cache = (0.0, "")
 
 
 @app.middleware("http")
@@ -90,15 +135,12 @@ async def auth_middleware(request: Request, call_next):
         return await call_next(request)
     if path.startswith(f"{settings.api_prefix}/auth/"):
         return await call_next(request)
-    db = SessionLocal()
-    try:
-        if not _auth_enabled(db):
-            return await call_next(request)
-        token = _get_token_from_request(request)
-        if not token or not _verify_token(_get_auth_secret(db), token):
-            return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
-    finally:
-        db.close()
+    secret = await asyncio.to_thread(_auth_secret_cached)
+    if not secret:
+        return await call_next(request)
+    token = _get_token_from_request(request)
+    if not token or not _verify_token(secret, token):
+        return JSONResponse(status_code=401, content={"detail": "Unauthorized"})
     return await call_next(request)
 
 
@@ -157,9 +199,25 @@ def _redis_del(key: str):
         pass
 
 
-def _invalidate_repo_caches():
-    _redis_del(_REPO_INFO_KEY)
-    _redis_del(_GIT_SNAPSHOT_KEY)
+def _repo_info_key(workspace_id: str) -> str:
+    return f"{_REPO_INFO_KEY_PREFIX}{workspace_id}"
+
+
+def _git_snapshot_key(workspace_id: str) -> str:
+    return f"{_GIT_SNAPSHOT_KEY_PREFIX}{workspace_id}"
+
+
+def _invalidate_repo_caches(workspace_id: str | None = None):
+    if workspace_id:
+        _redis_del(_repo_info_key(workspace_id))
+        _redis_del(_git_snapshot_key(workspace_id))
+        return
+    for prefix in (_REPO_INFO_KEY_PREFIX, _GIT_SNAPSHOT_KEY_PREFIX):
+        try:
+            for key in redis_conn.scan_iter(match=f"{prefix}*"):
+                redis_conn.delete(key)
+        except Exception:
+            pass
 
 
 async def _enqueue_build(function_name: str, *args) -> str:
@@ -182,7 +240,7 @@ def _http_metric_key(method: str, route_label: str) -> str:
 
 def _record_http_metric(method: str, route_label: str, status_code: int, latency_ms: float):
     key = _http_metric_key(method, route_label)
-    ms = max(0, int(round(latency_ms)))
+    ms = max(0, round(latency_ms))
     bucket_field = "b_inf"
     for bound in _HTTP_LAT_BUCKETS_MS:
         if ms <= bound:
@@ -264,17 +322,43 @@ def _http_metrics_top(limit: int = 10, sort_by: str = "p95") -> list[dict[str, i
     return items[: max(1, min(limit, 100))]
 
 
-def _resolve_un1ca_root_path() -> Path | None:
-    # Ищем корень UN1CA по сигнатуре каталогов, чтобы API работал и с bind-mount, и с volume clone.
-    candidates = [Path(settings.un1ca_root), Path("/workspace/UN1CA"), Path("/workspace")]
-    for root in candidates:
+# =====================================================================
+# Workspace resolution
+# =====================================================================
+
+
+def _require_ws(db: Session, workspace_id: str | None) -> WorkspaceRef:
+    ws = ws_lib.get_workspace(db, workspace_id)
+    if ws is None:
+        raise HTTPException(400, "No workspace configured")
+    if workspace_id and ws.id != workspace_id:
+        raise HTTPException(404, "Workspace not found")
+    ws_lib.ensure_layout(ws)
+    return ws_lib.snapshot(ws)
+
+
+def _require_ws_new_session(workspace_id: str | None) -> WorkspaceRef:
+    db = SessionLocal()
+    try:
+        return _require_ws(db, workspace_id)
+    finally:
+        db.close()
+
+
+def _project_root(ws: WorkspaceRef) -> Path | None:
+    # Locate the UN1CA root by directory signature so a bind-mount and a volume clone both work
+    for root in (ws.root, ws.root / "UN1CA"):
         if (root / "target").is_dir() and (root / "unica" / "configs" / "version.sh").is_file():
             return root
     return None
 
 
+def _repo_exists(ws: WorkspaceRef) -> bool:
+    return (ws.root / ".git").is_dir()
+
+
 def _read_var_from_shell_file(path: Path, var_name: str) -> str | None:
-    # Читаем простые VAR=... из shell-файлов без source/exec, lightweight parse for config defaults.
+    # Read plain VAR=... out of shell files without sourcing them
     if not path.exists():
         return None
     pattern = re.compile(rf'^\s*{re.escape(var_name)}\s*=\s*"?([^"\n#]+)"?')
@@ -283,6 +367,12 @@ def _read_var_from_shell_file(path: Path, var_name: str) -> str | None:
         if match:
             return match.group(1).strip()
     return None
+
+
+def _read_int_from_shell_file(path: Path, var_name: str) -> int:
+    raw = _read_var_from_shell_file(path, var_name) or ""
+    digits = re.match(r"^\d+", raw.strip())
+    return int(digits.group(0)) if digits else 0
 
 
 def _get_setting(db: Session, key: str, default: str = "") -> str:
@@ -300,21 +390,6 @@ def _set_setting(db: Session, key: str, value: str):
     else:
         row.value = value
     db.commit()
-
-
-def _delete_setting(db: Session, key: str):
-    row = db.get(AppSetting, key)
-    if row:
-        db.delete(row)
-        db.commit()
-
-
-def _get_setting_value(key: str, default: str = "") -> str:
-    db = SessionLocal()
-    try:
-        return _get_setting(db, key, default)
-    finally:
-        db.close()
 
 
 def _delete_setting(db: Session, key: str):
@@ -392,33 +467,6 @@ def _safe_git_url(url: str) -> str:
     return url
 
 
-def _git_url_with_auth(url: str, username: str, token: str) -> str:
-    if not url.startswith("http"):
-        return url
-    if not token:
-        return url
-    user = username or "oauth2"
-    return re.sub(r"^https?://", lambda m: f"{m.group(0)}{user}:{token}@", url, count=1)
-
-
-def _repo_root() -> Path:
-    base = Path(settings.un1ca_root)
-    nested = base / "UN1CA"
-    if (base / ".git").is_dir() or (base / "target").is_dir():
-        return base
-    if (nested / ".git").is_dir() or (nested / "target").is_dir():
-        return nested
-    return base
-
-
-def _repo_exists() -> bool:
-    return (_repo_root() / ".git").is_dir()
-
-
-def _repo_size_bytes() -> int:
-    return _dir_size_bytes(_repo_root())
-
-
 def _parse_model_csc(firmware_value: str) -> tuple[str, str]:
     parts = (firmware_value or "").split("/")
     if len(parts) < 2:
@@ -427,23 +475,18 @@ def _parse_model_csc(firmware_value: str) -> tuple[str, str]:
 
 
 def _require_ws_auth(websocket: WebSocket):
-    db = SessionLocal()
-    try:
-        if not _auth_enabled(db):
-            return True
-        token = websocket.query_params.get("token", "")
-        auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization") or ""
-        if not token and auth.lower().startswith("bearer "):
-            token = auth.split(" ", 1)[1].strip()
-        if not token or not _verify_token(_get_auth_secret(db), token):
-            return False
+    secret = _auth_secret_cached()
+    if not secret:
         return True
-    finally:
-        db.close()
+    token = websocket.query_params.get("token", "")
+    auth = websocket.headers.get("authorization") or websocket.headers.get("Authorization") or ""
+    if not token and auth.lower().startswith("bearer "):
+        token = auth.split(" ", 1)[1].strip()
+    return bool(token and _verify_token(secret, token))
 
 
 def _get_latest_firmware(model: str, csc: str) -> str:
-    # Берем latest версию с Samsung version.xml, но с TTL-кэшем и stale fallback.
+    # Latest version comes from the Samsung version.xml, behind a TTL cache with a stale fallback
     if not model or not csc:
         return ""
     cache_key = f"{model.upper()}_{csc.upper()}"
@@ -471,19 +514,25 @@ def _get_latest_firmware(model: str, csc: str) -> str:
         _redis_hincr(_FW_STATS_KEY, "net_err")
         if cached:
             return str(cached.get("value") or "")
-        _redis_set_json(redis_key, {
-            "value": "",
-            "fetched_at": 0.0,
-            "attempted_at": now,
-        })
+        _redis_set_json(
+            redis_key,
+            {
+                "value": "",
+                "fetched_at": 0.0,
+                "attempted_at": now,
+            },
+        )
         return ""
     m = re.search(r"<latest[^>]*>(.*?)</latest>", body)
-    latest = (m.group(1).strip() if m else "")
-    _redis_set_json(redis_key, {
-        "value": latest,
-        "fetched_at": now if latest else 0.0,
-        "attempted_at": now,
-    })
+    latest = m.group(1).strip() if m else ""
+    _redis_set_json(
+        redis_key,
+        {
+            "value": latest,
+            "fetched_at": now if latest else 0.0,
+            "attempted_at": now,
+        },
+    )
     return latest
 
 
@@ -503,7 +552,7 @@ def _dir_size_bytes(path: Path) -> int:
         return 0
     for p in path.rglob("*"):
         try:
-            if p.is_file():
+            if p.is_file() and not p.is_symlink():
                 total += p.stat().st_size
         except OSError:
             pass
@@ -511,12 +560,12 @@ def _dir_size_bytes(path: Path) -> int:
     return total
 
 
-def _collect_resources() -> dict:
+def _collect_resources(ws: WorkspaceRef) -> dict:
     load1, load5, load15 = os.getloadavg()
     mem_total = 0
     mem_available = 0
     try:
-        with open("/proc/meminfo", "r", encoding="utf-8", errors="ignore") as f:
+        with open("/proc/meminfo", encoding="utf-8", errors="ignore") as f:
             for line in f:
                 if line.startswith("MemTotal:"):
                     mem_total = int(line.split()[1]) * 1024
@@ -525,7 +574,7 @@ def _collect_resources() -> dict:
     except Exception:
         pass
     mem_used = max(0, mem_total - mem_available)
-    out_usage = shutil.disk_usage(settings.out_dir) if Path(settings.out_dir).exists() else shutil.disk_usage("/")
+    out_usage = shutil.disk_usage(ws.out) if Path(ws.out).exists() else shutil.disk_usage("/")
     data_usage = shutil.disk_usage(settings.data_dir) if Path(settings.data_dir).exists() else shutil.disk_usage("/")
     return {
         "load": {"1m": load1, "5m": load5, "15m": load15},
@@ -537,32 +586,33 @@ def _collect_resources() -> dict:
     }
 
 
-def _collect_samsung_fw() -> dict[str, list[dict[str, str | int | bool]]]:
-    # Собираем Odin/FW кэш в единый список карточек по ключу MODEL_CSC.
-    out_root = Path(settings.out_dir)
+def _empty_fw_row(key: str, model: str, csc: str) -> dict[str, str | int | bool]:
+    return {
+        "key": key,
+        "model": model,
+        "csc": csc,
+        "odin_version": "",
+        "fw_version": "",
+        "latest_version": "",
+        "odin_size_bytes": 0,
+        "fw_size_bytes": 0,
+        "has_odin": False,
+        "has_fw": False,
+    }
+
+
+def _collect_samsung_fw(ws: WorkspaceRef) -> dict[str, list[dict[str, str | int | bool]]]:
+    # Fold the Odin/FW cache into a single card list keyed by MODEL_CSC
+    out_root = Path(ws.out)
     odin_root = out_root / "odin"
     fw_root = out_root / "fw"
     rows: dict[str, dict[str, str | int | bool]] = {}
 
     if odin_root.is_dir():
         for d in sorted([x for x in odin_root.iterdir() if x.is_dir()], key=lambda x: x.name):
-            model, csc = (d.name.split("_", 1) + [""])[:2] if "_" in d.name else (d.name, "")
+            model, csc = (*d.name.split("_", 1), "")[:2] if "_" in d.name else (d.name, "")
             key = f"{model}_{csc}" if csc else model
-            rows.setdefault(
-                key,
-                {
-                    "key": key,
-                    "model": model,
-                    "csc": csc,
-                    "odin_version": "",
-                    "fw_version": "",
-                    "latest_version": "",
-                    "odin_size_bytes": 0,
-                    "fw_size_bytes": 0,
-                    "has_odin": False,
-                    "has_fw": False,
-                },
-            )
+            rows.setdefault(key, _empty_fw_row(key, model, csc))
             rows[key]["has_odin"] = True
             rows[key]["odin_size_bytes"] = _dir_size_bytes(d)
             marker = d / ".downloaded"
@@ -571,23 +621,9 @@ def _collect_samsung_fw() -> dict[str, list[dict[str, str | int | bool]]]:
 
     if fw_root.is_dir():
         for d in sorted([x for x in fw_root.iterdir() if x.is_dir()], key=lambda x: x.name):
-            model, csc = (d.name.split("_", 1) + [""])[:2] if "_" in d.name else (d.name, "")
+            model, csc = (*d.name.split("_", 1), "")[:2] if "_" in d.name else (d.name, "")
             key = f"{model}_{csc}" if csc else model
-            rows.setdefault(
-                key,
-                {
-                    "key": key,
-                    "model": model,
-                    "csc": csc,
-                    "odin_version": "",
-                    "fw_version": "",
-                    "latest_version": "",
-                    "odin_size_bytes": 0,
-                    "fw_size_bytes": 0,
-                    "has_odin": False,
-                    "has_fw": False,
-                },
-            )
+            rows.setdefault(key, _empty_fw_row(key, model, csc))
             rows[key]["has_fw"] = True
             rows[key]["fw_size_bytes"] = _dir_size_bytes(d)
             marker = d / ".extracted"
@@ -598,7 +634,7 @@ def _collect_samsung_fw() -> dict[str, list[dict[str, str | int | bool]]]:
 
 
 def _fill_latest_for_fw_items(items: list[dict[str, str | int | bool]]):
-    # Resolve latest firmware in parallel to avoid N sequential network waits on first load.
+    # Resolve latest firmware in parallel to avoid N sequential network waits on first load
     pairs: list[tuple[str, str]] = []
     for item in items:
         model = str(item.get("model") or "")
@@ -625,7 +661,7 @@ def _fill_latest_for_fw_items(items: list[dict[str, str | int | bool]]):
 
 
 def _make_firmware_status(firmware_value: str, cache_items: list[dict[str, str | int | bool]]) -> dict[str, str | bool]:
-    # Формируем status для верхних карточек source/target с флагом up_to_date.
+    # Status payload for the source/target cards, including the up_to_date flag
     model, csc = _parse_model_csc(firmware_value)
     key = f"{model}_{csc}" if model and csc else ""
     entry = next((x for x in cache_items if x.get("key") == key), None)
@@ -642,32 +678,33 @@ def _make_firmware_status(firmware_value: str, cache_items: list[dict[str, str |
     }
 
 
-def _get_targets() -> list[str]:
-    override = _get_targets_override()
+def _parse_targets_override(value: str) -> list[str]:
+    if not value:
+        return []
+    parts = re.split(r"[\s,]+", value.strip())
+    return [p for p in (x.strip() for x in parts) if p]
+
+
+def _get_targets_detected(ws: WorkspaceRef) -> list[str]:
+    project_root = _project_root(ws)
+    if not project_root:
+        return []
+    root = project_root / "target"
+    if not root.is_dir():
+        return []
+    return sorted([d.name for d in root.iterdir() if d.is_dir()])
+
+
+def _get_targets(ws: WorkspaceRef) -> list[str]:
+    override = _parse_targets_override(ws.targets_override)
     if override:
         return override
-    project_root = _resolve_un1ca_root_path()
-    if not project_root:
-        return []
-    root = project_root / "target"
-    if not root.is_dir():
-        return []
-    return sorted([d.name for d in root.iterdir() if d.is_dir()])
+    return _get_targets_detected(ws)
 
 
-def _get_targets_detected() -> list[str]:
-    project_root = _resolve_un1ca_root_path()
-    if not project_root:
-        return []
-    root = project_root / "target"
-    if not root.is_dir():
-        return []
-    return sorted([d.name for d in root.iterdir() if d.is_dir()])
-
-
-def _get_target_options() -> list[dict[str, str]]:
-    override = _get_targets_override()
-    root = _resolve_un1ca_root_path()
+def _get_target_options(ws: WorkspaceRef) -> list[dict[str, str]]:
+    override = _parse_targets_override(ws.targets_override)
+    root = _project_root(ws)
     if not root:
         if override:
             return [{"code": code, "name": code} for code in override]
@@ -685,20 +722,18 @@ def _get_target_options() -> list[dict[str, str]]:
     return options
 
 
-def _get_defaults_for_target(target: str) -> dict[str, str | int]:
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+def _get_defaults_for_target(ws: WorkspaceRef, target: str) -> dict[str, str | int]:
+    root = _project_root(ws) or Path(ws.root)
     preferred = _preferred_source_configs_for_target(root, target)
-    source_firmware = _read_source_firmware_from_configs(root, _get_source_config_override(), preferred)
+    source_firmware = _read_source_firmware_from_configs(root, ws.source_config_override, preferred)
     target_firmware = _read_var_from_shell_file(root / "target" / target / "config.sh", "TARGET_FIRMWARE") or ""
-    version_major = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MAJOR") or 0)
-    version_minor = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_MINOR") or 0)
-    version_patch = int(_read_var_from_shell_file(root / "unica" / "configs" / "version.sh", "VERSION_PATCH") or 0)
+    version_path = root / "unica" / "configs" / "version.sh"
     return {
         "source_firmware": source_firmware,
         "target_firmware": target_firmware,
-        "version_major": version_major,
-        "version_minor": version_minor,
-        "version_patch": version_patch,
+        "version_major": _read_int_from_shell_file(version_path, "VERSION_MAJOR"),
+        "version_minor": _read_int_from_shell_file(version_path, "VERSION_MINOR"),
+        "version_patch": _read_int_from_shell_file(version_path, "VERSION_PATCH"),
         "version_suffix": "",
     }
 
@@ -723,20 +758,17 @@ def _read_source_firmware_from_configs_with_source(
         if override_name:
             value = _read_var_from_shell_file(configs_dir / override_name, "SOURCE_FIRMWARE")
             if value:
-                logger.info("SOURCE_FIRMWARE read from override %s", configs_dir / override_name)
                 return value, override_name
     preferred_list = [x for x in (preferred or []) if x]
     if preferred_list:
         for name in preferred_list:
             value = _read_var_from_shell_file(configs_dir / name, "SOURCE_FIRMWARE")
             if value:
-                logger.info("SOURCE_FIRMWARE read from %s", configs_dir / name)
                 return value, name
     fallback = ["essi.sh", "essi_64.sh", "qssi.sh", "mssi.sh"]
     for name in fallback:
         value = _read_var_from_shell_file(configs_dir / name, "SOURCE_FIRMWARE")
         if value:
-            logger.info("SOURCE_FIRMWARE read from %s", configs_dir / name)
             return value, name
     if configs_dir.is_dir():
         for cfg in sorted(configs_dir.glob("*.sh")):
@@ -744,9 +776,7 @@ def _read_source_firmware_from_configs_with_source(
                 continue
             value = _read_var_from_shell_file(cfg, "SOURCE_FIRMWARE")
             if value:
-                logger.info("SOURCE_FIRMWARE read from %s", cfg)
                 return value, cfg.name
-    logger.warning("SOURCE_FIRMWARE not found in %s", configs_dir)
     return "", ""
 
 
@@ -784,22 +814,6 @@ def _list_config_candidates(root: Path) -> list[dict[str, str | bool]]:
     return entries
 
 
-def _parse_targets_override(value: str) -> list[str]:
-    if not value:
-        return []
-    parts = re.split(r"[\s,]+", value.strip())
-    return [p for p in (x.strip() for x in parts) if p]
-
-
-def _get_targets_override() -> list[str]:
-    value = _get_setting_value("targets_override").strip()
-    return _parse_targets_override(value)
-
-
-def _get_source_config_override() -> str:
-    return _get_setting_value("source_config_override").strip()
-
-
 def _firmware_path_from_value(value: str) -> str:
     parts = (value or "").split("/")
     if len(parts) < 2:
@@ -812,12 +826,13 @@ def _firmware_path_from_value(value: str) -> str:
 
 
 def _collect_ff_defaults(
+    ws: WorkspaceRef,
     target: str,
     source_firmware: str,
     target_firmware: str,
 ) -> dict[str, object]:
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    out_root = Path(settings.out_dir)
+    root = _project_root(ws) or Path(ws.root)
+    out_root = Path(ws.out)
     source_key = _firmware_path_from_value(source_firmware)
     target_key = _firmware_path_from_value(target_firmware)
     fallback_xml = Path(__file__).resolve().parents[2] / "floating_feature.xml"
@@ -874,6 +889,7 @@ def _collect_ff_defaults(
 
 
 def _build_signature(
+    workspace_id: str,
     target: str,
     source_commit: str,
     source_firmware: str,
@@ -889,9 +905,10 @@ def _build_signature(
     mods_signature: str,
     ff_signature: str,
 ) -> str:
-    # Сигнатура сборки нужна для reuse готового ZIP без повторной сборки.
+    # The build signature is what lets an identical request reuse an existing ZIP
     payload = "|".join(
         [
+            workspace_id,
             target,
             source_commit,
             source_firmware,
@@ -911,122 +928,75 @@ def _build_signature(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
 
 
-def _resolve_source_commit() -> str:
-    # Git может ругаться на ownership в контейнере, поэтому всегда safe.directory=*.
-    root = _resolve_un1ca_root_path()
+def _git_text(root: Path, args: list[str]) -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "-c", "safe.directory=*", "-C", str(root), *args],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _resolve_source_commit(ws: WorkspaceRef) -> str:
+    # Git objects to directory ownership inside the container, hence safe.directory=* everywhere
+    root = _project_root(ws)
     if not root:
         return settings.source_commit or "unknown"
-    try:
-        out = subprocess.check_output(
-            ["git", "-c", "safe.directory=*", "-C", str(root), "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        if out:
-            return out
-    except Exception:  # noqa: BLE001
-        pass
-    return settings.source_commit or "unknown"
+    return _git_text(root, ["rev-parse", "--short", "HEAD"]) or (settings.source_commit or "unknown")
 
 
-def _create_operation_job(db: Session, *, target: str, operation_name: str) -> BuildJob:
-    # Operation jobs (extract/delete/stop) показываем в том же списке jobs, чтобы UI был единый.
-    job = BuildJob(
-        job_kind="operation",
-        operation_name=operation_name,
-        target=target,
-        source_commit=_resolve_source_commit(),
-        force=False,
-        no_rom_zip=False,
-        status="queued",
-    )
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+def _empty_commit_details() -> dict[str, str]:
+    return {
+        "branch": "",
+        "short_hash": settings.source_commit or "unknown",
+        "full_hash": "",
+        "subject": "",
+        "body": "",
+        "author_name": "",
+        "author_email": "",
+        "committer_name": "",
+        "committer_email": "",
+    }
 
 
-def _resolve_source_commit_subject() -> str:
-    root = _resolve_un1ca_root_path()
+def _resolve_commit_details(ws: WorkspaceRef) -> dict[str, str]:
+    # Commit detail shown on the repository screen
+    root = _project_root(ws)
     if not root:
-        return ""
-    try:
-        out = subprocess.check_output(
-            ["git", "-c", "safe.directory=*", "-C", str(root), "log", "-1", "--pretty=%s"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-        return out
-    except Exception:  # noqa: BLE001
-        return ""
+        return _empty_commit_details()
+    branch = _git_text(root, ["rev-parse", "--abbrev-ref", "HEAD"])
+    fmt = "%H%n%h%n%s%n%b%n%an%n%ae%n%cn%n%ce"
+    raw = _git_text(root, ["log", "-1", f"--pretty={fmt}"])
+    if not raw:
+        details = _empty_commit_details()
+        details["branch"] = branch
+        return details
+    parts = raw.split("\n")
+    full_hash = parts[0].strip() if len(parts) > 0 else ""
+    short_hash = parts[1].strip() if len(parts) > 1 else (settings.source_commit or "unknown")
+    subject = parts[2].strip() if len(parts) > 2 else ""
+    author_name = parts[-4].strip() if len(parts) >= 4 else ""
+    author_email = parts[-3].strip() if len(parts) >= 3 else ""
+    committer_name = parts[-2].strip() if len(parts) >= 2 else ""
+    committer_email = parts[-1].strip() if len(parts) >= 1 else ""
+    body = "\n".join(parts[3:-4]).strip() if len(parts) > 7 else ""
+    return {
+        "branch": branch,
+        "short_hash": short_hash,
+        "full_hash": full_hash,
+        "subject": subject,
+        "body": body,
+        "author_name": author_name,
+        "author_email": author_email,
+        "committer_name": committer_name,
+        "committer_email": committer_email,
+    }
 
 
-def _resolve_commit_details() -> dict[str, str]:
-    # Подробности коммита для модалки Current Commit.
-    root = _resolve_un1ca_root_path()
-    if not root:
-        return {
-            "branch": "",
-            "short_hash": settings.source_commit or "unknown",
-            "full_hash": "",
-            "subject": "",
-            "body": "",
-            "author_name": "",
-            "author_email": "",
-            "committer_name": "",
-            "committer_email": "",
-        }
-    try:
-        branch = subprocess.check_output(
-            ["git", "-c", "safe.directory=*", "-C", str(root), "rev-parse", "--abbrev-ref", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        ).strip()
-    except Exception:
-        branch = ""
-    try:
-        fmt = "%H%n%h%n%s%n%b%n%an%n%ae%n%cn%n%ce"
-        raw = subprocess.check_output(
-            ["git", "-c", "safe.directory=*", "-C", str(root), "log", "-1", f"--pretty={fmt}"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        parts = raw.split("\n")
-        full_hash = parts[0].strip() if len(parts) > 0 else ""
-        short_hash = parts[1].strip() if len(parts) > 1 else (settings.source_commit or "unknown")
-        subject = parts[2].strip() if len(parts) > 2 else ""
-        author_name = parts[-4].strip() if len(parts) >= 4 else ""
-        author_email = parts[-3].strip() if len(parts) >= 3 else ""
-        committer_name = parts[-2].strip() if len(parts) >= 2 else ""
-        committer_email = parts[-1].strip() if len(parts) >= 1 else ""
-        body = "\n".join(parts[3:-4]).strip() if len(parts) > 7 else ""
-        return {
-            "branch": branch,
-            "short_hash": short_hash,
-            "full_hash": full_hash,
-            "subject": subject,
-            "body": body,
-            "author_name": author_name,
-            "author_email": author_email,
-            "committer_name": committer_name,
-            "committer_email": committer_email,
-        }
-    except Exception:
-        return {
-            "branch": branch,
-            "short_hash": settings.source_commit or "unknown",
-            "full_hash": "",
-            "subject": "",
-            "body": "",
-            "author_name": "",
-            "author_email": "",
-            "committer_name": "",
-            "committer_email": "",
-        }
-
-
-def _repo_sync_status(root: Path, branch: str) -> dict[str, str | int]:
-    # Считаем ahead/behind относительно origin/<branch> для цветового статуса в UI.
+def _repo_sync_status(root: Path | None, branch: str) -> dict[str, str | int]:
+    # ahead/behind against origin/<branch> drives the sync badge in the UI
     if not root or not branch or branch == "HEAD":
         return {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": ""}
     remote_ref = f"origin/{branch}"
@@ -1041,11 +1011,21 @@ def _repo_sync_status(root: Path, branch: str) -> dict[str, str | int]:
             return {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": remote_ref}
 
         counts = subprocess.check_output(
-            ["git", "-c", "safe.directory=*", "-C", str(root), "rev-list", "--left-right", "--count", f"HEAD...{remote_ref}"],
+            [
+                "git",
+                "-c",
+                "safe.directory=*",
+                "-C",
+                str(root),
+                "rev-list",
+                "--left-right",
+                "--count",
+                f"HEAD...{remote_ref}",
+            ],
             stderr=subprocess.DEVNULL,
             text=True,
         ).strip()
-        left, right = (counts.split() + ["0", "0"])[:2]
+        left, right = (*counts.split(), "0", "0")[:2]
         ahead_by = int(left)
         behind_by = int(right)
         if ahead_by == 0 and behind_by == 0:
@@ -1061,108 +1041,55 @@ def _repo_sync_status(root: Path, branch: str) -> dict[str, str | int]:
         return {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": remote_ref}
 
 
-def _git_snapshot_cached() -> dict[str, dict]:
-    cached = _redis_get_json(_GIT_SNAPSHOT_KEY)
+def _git_snapshot_cached(ws: WorkspaceRef) -> dict[str, dict]:
+    cache_key = _git_snapshot_key(ws.id)
+    cached = _redis_get_json(cache_key)
     if cached and isinstance(cached.get("commit"), dict) and isinstance(cached.get("repo_sync"), dict):
         return cached
-    if not _repo_exists():
+    if not _repo_exists(ws):
         payload = {
-            "commit": {
-                "branch": "",
-                "short_hash": settings.source_commit or "unknown",
-                "full_hash": "",
-                "subject": "",
-                "body": "",
-                "author_name": "",
-                "author_email": "",
-                "committer_name": "",
-                "committer_email": "",
-            },
-            "repo_sync": {
-                "state": "unknown",
-                "ahead_by": 0,
-                "behind_by": 0,
-                "remote_ref": "",
-            },
+            "commit": _empty_commit_details(),
+            "repo_sync": {"state": "unknown", "ahead_by": 0, "behind_by": 0, "remote_ref": ""},
         }
     else:
-        repo_root = _repo_root()
-        commit_details = _resolve_commit_details()
-        repo_sync = _repo_sync_status(repo_root, str(commit_details.get("branch") or ""))
+        commit_details = _resolve_commit_details(ws)
+        repo_sync = _repo_sync_status(_project_root(ws), str(commit_details.get("branch") or ""))
         payload = {"commit": commit_details, "repo_sync": repo_sync}
-    _redis_set_json(_GIT_SNAPSHOT_KEY, payload)
+    _redis_set_json(cache_key, payload)
     try:
-        redis_conn.expire(_GIT_SNAPSHOT_KEY, int(_GIT_SNAPSHOT_TTL_SEC))
+        redis_conn.expire(cache_key, int(_GIT_SNAPSHOT_TTL_SEC))
     except Exception:
         pass
     return payload
 
 
-def _repo_info(db: Session) -> dict[str, str | int | bool | dict]:
-    cached = _redis_get_json(_REPO_INFO_KEY)
+def _repo_info(ws: WorkspaceRef) -> dict[str, str | int | bool | dict]:
+    cache_key = _repo_info_key(ws.id)
+    cached = _redis_get_json(cache_key)
     if cached and isinstance(cached.get("git_url"), str):
+        cached["progress"] = get_repo_progress(ws.id)
         return cached
 
-    repo_root = _repo_root()
-    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
-    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
-    git_username = _get_setting(db, "repo.git_username", "")
-    git_token = _get_setting(db, "repo.git_token", "")
-    snapshot = _git_snapshot_cached()
-    commit_details = snapshot.get("commit", {})
-    repo_sync = snapshot.get("repo_sync", {})
+    snapshot = _git_snapshot_cached(ws)
     payload = {
-        "git_url": git_url,
-        "git_ref": git_ref,
-        "repo_path": str(repo_root),
-        "repo_exists": _repo_exists(),
-        "repo_size_bytes": _repo_size_bytes(),
-        "git_username": git_username,
-        "git_token_set": bool(git_token),
-        "commit": commit_details,
-        "repo_sync": repo_sync,
-        "progress": get_repo_progress(),
+        "workspace_id": ws.id,
+        "git_url": ws.git_url,
+        "git_ref": ws.git_ref,
+        "repo_path": str(ws.root),
+        "repo_exists": _repo_exists(ws),
+        "repo_size_bytes": _dir_size_bytes(Path(ws.root)),
+        "git_username": ws.git_username,
+        "git_token_set": bool(ws.git_token),
+        "commit": snapshot.get("commit", {}),
+        "repo_sync": snapshot.get("repo_sync", {}),
     }
-    _redis_set_json(_REPO_INFO_KEY, payload)
+    _redis_set_json(cache_key, payload)
     try:
-        redis_conn.expire(_REPO_INFO_KEY, int(_REPO_INFO_TTL_SEC))
+        redis_conn.expire(cache_key, int(_REPO_INFO_TTL_SEC))
     except Exception:
         pass
+    payload["progress"] = get_repo_progress(ws.id)
     return payload
-
-
-def _repo_info_with_new_session() -> dict[str, str | int | bool | dict]:
-    db = SessionLocal()
-    try:
-        return _repo_info(db)
-    finally:
-        db.close()
-
-
-def _run_repo_pull() -> dict[str, str | int]:
-    # Без merge-commit: pull только fast-forward, then sync/update submodules.
-    root = _resolve_un1ca_root_path()
-    if not root:
-        raise HTTPException(400, "Repository root is not available")
-    details = _resolve_commit_details()
-    branch = str(details.get("branch") or "").strip()
-    if not branch or branch == "HEAD":
-        raise HTTPException(400, "Detached HEAD: checkout a branch before pull")
-
-    cmd = (
-        f"cd {shlex.quote(str(root))} && "
-        f"git -c safe.directory=* fetch --all --tags --prune && "
-        f"git -c safe.directory=* pull --ff-only origin {shlex.quote(branch)} && "
-        "git -c safe.directory=* submodule sync --recursive && "
-        "git -c safe.directory=* submodule update --init --recursive --jobs 8"
-    )
-    try:
-        subprocess.check_output(["bash", "-lc", cmd], stderr=subprocess.STDOUT, text=True)
-    except subprocess.CalledProcessError as exc:
-        raise HTTPException(409, f"Pull failed: {(exc.output or '').strip()}") from exc
-
-    updated = _resolve_commit_details()
-    return {"commit": updated, "repo_sync": _repo_sync_status(root, str(updated.get('branch') or ''))}
 
 
 def _normalize_path_list(values: list[str] | None) -> list[str]:
@@ -1174,7 +1101,7 @@ def _normalize_path_list(values: list[str] | None) -> list[str]:
         item = (raw or "").strip()
         if not item or item in seen:
             continue
-        # Keep this simple: debloat values are plain partition-relative paths.
+        # Keep this simple: debloat values are plain partition-relative paths
         if any(ch in item for ch in ("\n", "\r", '"')):
             raise HTTPException(400, f"Invalid debloat path: {item!r}")
         out.append(item)
@@ -1188,14 +1115,25 @@ async def on_startup():
     Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)
     Base.metadata.create_all(bind=engine)
     run_migrations()
+    db = SessionLocal()
+    try:
+        ws_lib.bootstrap(db)
+        for ws in ws_lib.list_workspaces(db):
+            ws_lib.ensure_layout(ws)
+    finally:
+        db.close()
     cleaned = await asyncio.to_thread(cleanup_stale_build_overrides)
+    # Progress lives in Redis and outlives the processes that wrote it; a fresh
+    # boot means nothing is running, so start from an empty board
     clear_progress()
     clear_repo_progress()
+    clear_build_progress()
     _invalidate_repo_caches()
     await get_arq_pool()
     print(
         f"[startup] cleanup: removed {cleaned['uploaded_mod_dirs']} uploaded mod override dirs, "
-        f"{cleaned['tmp_extra_mods_dirs']} temp extra-mod dirs",
+        f"{cleaned['tmp_extra_mods_dirs']} temp extra-mod dirs, "
+        f"{cleaned['stale_clone_dirs']} stale clone dirs",
         flush=True,
     )
 
@@ -1228,13 +1166,14 @@ async def http_perf_metrics_middleware(request: Request, call_next):
         _record_http_metric(request.method, str(route_label), status_code, (time.perf_counter() - started) * 1000.0)
 
 
-def _target_has_latest_artifact(db: Session, target: str) -> bool:
-    # Кнопка Latest ZIP должна быть active только если файл реально существует на диске.
+def _target_has_latest_artifact(db: Session, workspace_id: str, target: str) -> bool:
+    # The Latest ZIP button may only light up when the file is really on disk
     if not target:
         return False
     job = (
         db.query(BuildJob)
         .filter(
+            BuildJob.workspace_id == workspace_id,
             BuildJob.target == target,
             BuildJob.status.in_(("succeeded", "reused")),
             BuildJob.artifact_path.isnot(None),
@@ -1247,18 +1186,21 @@ def _target_has_latest_artifact(db: Session, target: str) -> bool:
     return Path(job.artifact_path).exists()
 
 
-def _target_has_latest_artifact_with_new_session(target: str) -> bool:
+def _target_has_latest_artifact_with_new_session(workspace_id: str, target: str) -> bool:
     db = SessionLocal()
     try:
-        return _target_has_latest_artifact(db, target)
+        return _target_has_latest_artifact(db, workspace_id, target)
     finally:
         db.close()
 
 
-def _list_jobs_with_new_session(limit: int) -> list[BuildJob]:
+def _list_jobs_with_new_session(workspace_id: str | None, limit: int) -> list[BuildJob]:
     db = SessionLocal()
     try:
-        return db.query(BuildJob).order_by(desc(BuildJob.created_at)).limit(min(max(limit, 1), 200)).all()
+        q = db.query(BuildJob)
+        if workspace_id:
+            q = q.filter(BuildJob.workspace_id == workspace_id)
+        return q.order_by(desc(BuildJob.created_at)).limit(min(max(limit, 1), 200)).all()
     finally:
         db.close()
 
@@ -1285,14 +1227,13 @@ def _get_job_artifact_path_with_new_session(job_id: str) -> Path:
         db.close()
 
 
-def _get_latest_artifact_path_for_target_with_new_session(target: str) -> Path:
+def _get_latest_artifact_path_for_target(workspace_id: str, target: str) -> Path:
     db = SessionLocal()
     try:
-        if target not in _get_targets():
-            raise HTTPException(400, "Unknown target")
         job = (
             db.query(BuildJob)
             .filter(
+                BuildJob.workspace_id == workspace_id,
                 BuildJob.target == target,
                 BuildJob.status.in_(("succeeded", "reused")),
                 BuildJob.artifact_path.isnot(None),
@@ -1310,12 +1251,13 @@ def _get_latest_artifact_path_for_target_with_new_session(target: str) -> Path:
         db.close()
 
 
-def _list_artifacts_with_new_session(target: str | None = None, limit: int = 50) -> list[dict]:
+def _list_artifacts_with_new_session(workspace_id: str, target: str | None = None, limit: int = 50) -> list[dict]:
     db = SessionLocal()
     try:
         q = (
             db.query(BuildJob)
             .filter(
+                BuildJob.workspace_id == workspace_id,
                 BuildJob.artifact_path.isnot(None),
                 BuildJob.status.in_(("succeeded", "reused")),
             )
@@ -1327,7 +1269,8 @@ def _list_artifacts_with_new_session(target: str | None = None, limit: int = 50)
         items = []
         for job in rows:
             size = 0
-            if job.artifact_path and Path(job.artifact_path).exists():
+            exists = bool(job.artifact_path and Path(job.artifact_path).exists())
+            if exists:
                 size = Path(job.artifact_path).stat().st_size
             items.append(
                 {
@@ -1335,6 +1278,7 @@ def _list_artifacts_with_new_session(target: str | None = None, limit: int = 50)
                     "target": job.target,
                     "artifact_path": job.artifact_path,
                     "size_bytes": size,
+                    "exists": exists,
                     "finished_at": job.finished_at.isoformat() if job.finished_at else None,
                     "source_commit": job.source_commit,
                     "version_major": job.version_major,
@@ -1345,27 +1289,6 @@ def _list_artifacts_with_new_session(target: str | None = None, limit: int = 50)
                 }
             )
         return items
-    finally:
-        db.close()
-
-
-def _update_repo_config_with_new_session(
-    git_url: str,
-    git_username: str | None = None,
-    git_token: str | None = None,
-) -> dict[str, str | int | bool | dict]:
-    db = SessionLocal()
-    try:
-        _set_setting(db, "repo.git_url", git_url)
-        if git_username is not None:
-            _set_setting(db, "repo.git_username", git_username.strip())
-        if git_token is not None:
-            if git_token.strip():
-                _set_setting(db, "repo.git_token", git_token.strip())
-            else:
-                _delete_setting(db, "repo.git_token")
-        _invalidate_repo_caches()
-        return _repo_info(db)
     finally:
         db.close()
 
@@ -1393,7 +1316,7 @@ async def healthz():
 async def readyz():
     try:
         return await asyncio.to_thread(_readyz_impl)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return JSONResponse(status_code=503, content={"status": "down", "reason": str(exc)})
 
 
@@ -1426,12 +1349,155 @@ async def auth_set_password(payload: dict, request: Request, db: Session = Depen
     if not password:
         _delete_setting(db, "auth.hash")
         _delete_setting(db, "auth.salt")
+        _invalidate_auth_cache()
         return {"enabled": False}
     salt = secrets.token_hex(16)
     hashed = _hash_password(password, salt)
     _set_setting(db, "auth.salt", salt)
     _set_setting(db, "auth.hash", hashed)
+    _invalidate_auth_cache()
     return {"enabled": True, "token": _make_token(hashed)}
+
+
+# =====================================================================
+# Workspaces
+# =====================================================================
+
+
+@app.get(f"{settings.api_prefix}/workspaces")
+async def list_workspaces(db: Session = Depends(get_db)):
+    rows = ws_lib.list_workspaces(db)
+    return {
+        "items": [ws_lib.serialize(ws) for ws in rows],
+        "default_id": rows[0].id if rows else "",
+        "workspaces_root": str(ws_lib.workspaces_root()),
+        "shared_cache_root": str(ws_lib.shared_cache_root()),
+    }
+
+
+@app.post(f"{settings.api_prefix}/workspaces")
+async def create_workspace(payload: WorkspaceCreate, db: Session = Depends(get_db)):
+    url = (payload.git_url or "").strip()
+    if not re.match(r"^(https://|git@|ssh://).+", url):
+        raise HTTPException(400, "Invalid git url")
+    ws = ws_lib.create_workspace(
+        db,
+        name=payload.name,
+        git_url=url,
+        git_ref=payload.git_ref or settings.repo_ref_default,
+        git_username=payload.git_username or "",
+        git_token=payload.git_token or "",
+        shared_fw_cache=payload.shared_fw_cache,
+    )
+    data = ws_lib.serialize(ws)
+    if payload.clone_now:
+        op_job = _create_operation_job(
+            db,
+            workspace_id=ws.id,
+            target="repo",
+            operation_name=f"Repo clone: {_safe_git_url(url)}",
+        )
+        op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, False)
+        db.commit()
+        data["clone_job_id"] = op_job.id
+    return data
+
+
+@app.patch(f"{settings.api_prefix}/workspaces/{{workspace_id}}")
+async def update_workspace(workspace_id: str, payload: WorkspaceUpdate, db: Session = Depends(get_db)):
+    ws = db.get(Workspace, workspace_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+    if payload.name is not None:
+        ws.name = payload.name.strip() or ws.name
+    if payload.git_url is not None:
+        url = payload.git_url.strip()
+        if not re.match(r"^(https://|git@|ssh://).+", url):
+            raise HTTPException(400, "Invalid git url")
+        ws.git_url = url
+    if payload.git_ref is not None:
+        ws.git_ref = payload.git_ref.strip() or ws.git_ref
+    if payload.git_username is not None:
+        ws.git_username = payload.git_username.strip()
+    if payload.git_token is not None:
+        ws.git_token = payload.git_token.strip()
+    if payload.shared_fw_cache is not None:
+        ws.shared_fw_cache = bool(payload.shared_fw_cache)
+    db.commit()
+    db.refresh(ws)
+    # Toggling the shared cache rewires out/odin and out/fw, moving any local
+    # cache into the shared tree on the way
+    await asyncio.to_thread(ws_lib.ensure_layout, ws)
+    _invalidate_repo_caches(ws.id)
+    return ws_lib.serialize(ws)
+
+
+@app.delete(f"{settings.api_prefix}/workspaces/{{workspace_id}}", response_model=BuildJobRead)
+async def delete_workspace(workspace_id: str, delete_files: bool = False, db: Session = Depends(get_db)):
+    ws = db.get(Workspace, workspace_id)
+    if not ws:
+        raise HTTPException(404, "Workspace not found")
+    if db.query(Workspace).count() <= 1:
+        raise HTTPException(400, "Cannot delete the last workspace")
+    running = (
+        db.query(BuildJob)
+        .filter(BuildJob.workspace_id == workspace_id, BuildJob.status.in_(("queued", "running")))
+        .count()
+    )
+    if running:
+        raise HTTPException(409, "Workspace has running jobs, stop them first")
+
+    remaining = [x for x in ws_lib.list_workspaces(db) if x.id != workspace_id]
+    host = remaining[0]
+    op_job = _create_operation_job(
+        db,
+        workspace_id=host.id,
+        target="repo",
+        operation_name=f"Delete workspace: {ws.name}",
+    )
+    op_job.queue_job_id = await _enqueue_build("workspace_delete_job_task", op_job.id, workspace_id, delete_files)
+    db.delete(ws)
+    db.commit()
+    db.refresh(op_job)
+    clear_repo_progress(workspace_id)
+    _invalidate_repo_caches(workspace_id)
+    return op_job
+
+
+@app.get(f"{settings.api_prefix}/push/config")
+async def push_config(db: Session = Depends(get_db)):
+    public = await asyncio.to_thread(push_service.public_key)
+    return {"public_key": public, "subscriptions": db.query(PushSubscription).count()}
+
+
+@app.post(f"{settings.api_prefix}/push/subscriptions")
+async def push_subscribe(payload: PushSubscriptionCreate, db: Session = Depends(get_db)):
+    p256dh = payload.keys.get("p256dh", "")
+    auth = payload.keys.get("auth", "")
+    if not p256dh or not auth:
+        raise HTTPException(400, "Subscription keys are missing")
+    row = db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).first()
+    if row is None:
+        row = PushSubscription(endpoint=payload.endpoint)
+        db.add(row)
+    row.p256dh = p256dh
+    row.auth = auth
+    row.language = (payload.language or "en")[:8]
+    db.commit()
+    return {"ok": True}
+
+
+@app.delete(f"{settings.api_prefix}/push/subscriptions")
+async def push_unsubscribe(payload: PushSubscriptionDelete, db: Session = Depends(get_db)):
+    db.query(PushSubscription).filter(PushSubscription.endpoint == payload.endpoint).delete()
+    db.commit()
+    return {"ok": True}
+
+
+@app.post(f"{settings.api_prefix}/push/test")
+async def push_test(language: str = "en"):
+    await asyncio.to_thread(push_service.broadcast, "test", "/build", "test", "info")
+    return {"ok": True}
 
 
 @app.get(f"{settings.api_prefix}/debug/perf")
@@ -1465,8 +1531,8 @@ async def debug_perf():
             "storage": "redis",
             "repo_info_ttl_sec": _REPO_INFO_TTL_SEC,
             "git_snapshot_ttl_sec": _GIT_SNAPSHOT_TTL_SEC,
-            "repo_info_cached": bool(_redis_get_json(_REPO_INFO_KEY)),
-            "git_snapshot_cached": bool(_redis_get_json(_GIT_SNAPSHOT_KEY)),
+            "repo_info_cached": _redis_count_keys(_REPO_INFO_KEY_PREFIX),
+            "git_snapshot_cached": _redis_count_keys(_GIT_SNAPSHOT_KEY_PREFIX),
         },
         "http_metrics": {
             "storage": "redis",
@@ -1475,9 +1541,50 @@ async def debug_perf():
     }
 
 
+@app.get(f"{settings.api_prefix}/avatars/{{username}}")
+async def avatar(username: str, size: int = 88):
+    # Proxied and cached on disk: GitHub only allows a five minute cache and
+    # answers the redirect with no-cache, so the About screen would hit the
+    # network on every open and show nothing at all when offline
+    try:
+        body, content_type = await asyncio.to_thread(get_avatar, username, size)
+    except AvatarError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return Response(
+        content=body,
+        media_type=content_type,
+        headers={"Cache-Control": f"max-age={int(_AVATAR_BROWSER_TTL_SEC)}"},
+    )
+
+
 @app.get(f"{settings.api_prefix}/system/resources")
-async def system_resources():
-    return await asyncio.to_thread(_collect_resources)
+async def system_resources(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    return await asyncio.to_thread(_collect_resources, ws)
+
+
+@app.websocket(f"{settings.api_prefix}/system/resources/ws")
+async def stream_resources_ws(websocket: WebSocket, workspace: str | None = None):
+    # Load, memory and disk only change by being sampled, so the ticker lives
+    # here and the client just listens
+    await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
+    try:
+        ws = await asyncio.to_thread(_require_ws_new_session, workspace)
+    except HTTPException:
+        await websocket.close(code=4404)
+        return
+    try:
+        while True:
+            payload = await asyncio.to_thread(_collect_resources, ws)
+            await websocket.send_json(payload)
+            await asyncio.sleep(2)
+    except WebSocketDisconnect:
+        pass
+    except RuntimeError:
+        pass
 
 
 @app.get(f"{settings.api_prefix}/debug/perf/top")
@@ -1488,51 +1595,55 @@ async def debug_perf_top(limit: int = 10, sort_by: str = "p95"):
     return {"sort_by": sort_by, "limit": max(1, min(limit, 100)), "items": top}
 
 
+def _create_operation_job(db: Session, *, workspace_id: str, target: str, operation_name: str) -> BuildJob:
+    # Operation jobs (extract/delete/repo) share the jobs list so the UI stays uniform
+    job = BuildJob(
+        workspace_id=workspace_id,
+        job_kind="operation",
+        operation_name=operation_name,
+        target=target,
+        source_commit="unknown",
+        force=False,
+        no_rom_zip=False,
+        status="queued",
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+    publish_job_event(job)
+    return job
+
+
 @app.post(f"{settings.api_prefix}/jobs", response_model=BuildJobRead)
-async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
-    # Главный endpoint постановки build job: defaults -> signature -> reuse или новая очередь.
-    source_commit = _resolve_source_commit()
-    if payload.target not in _get_targets():
+async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: Session = Depends(get_db)):
+    # Main build entry point: defaults -> signature -> reuse an artifact or queue a new build
+    ws = _require_ws(db, workspace)
+    source_commit = _resolve_source_commit(ws)
+    if payload.target not in _get_targets(ws):
         raise HTTPException(400, "Unknown target")
-    defaults = _get_defaults_for_target(payload.target)
+    defaults = _get_defaults_for_target(ws, payload.target)
     source_firmware = payload.source_firmware or str(defaults["source_firmware"])
     target_firmware = payload.target_firmware or str(defaults["target_firmware"])
     version_major = payload.version_major if payload.version_major is not None else int(defaults["version_major"])
     version_minor = payload.version_minor if payload.version_minor is not None else int(defaults["version_minor"])
     version_patch = payload.version_patch if payload.version_patch is not None else int(defaults["version_patch"])
-    version_suffix = (payload.version_suffix if payload.version_suffix is not None else str(defaults["version_suffix"])).strip()
-    extra_mods_signature = ""
-    extra_mods_archive_path = None
-    extra_mods_modules_json = None
-    if payload.extra_mods_upload_id:
-        meta = load_upload_meta(settings.data_dir, payload.extra_mods_upload_id)
-        if not meta:
-            raise HTTPException(400, "Invalid extra_mods_upload_id")
-        if meta.get("used"):
-            raise HTTPException(400, "This uploaded mods archive has already been used")
-        archive_path = meta.get("archive_path")
-        if not archive_path or not Path(archive_path).exists():
-            raise HTTPException(400, "Uploaded mods archive file is missing")
-        meta["used"] = True
-        save_upload_meta(settings.data_dir, payload.extra_mods_upload_id, meta)
-        extra_mods_archive_path = archive_path
-        modules = meta.get("modules", [])
-        extra_mods_modules_json = json.dumps(modules, ensure_ascii=True)
-        extra_mods_signature = hashlib.sha256(extra_mods_modules_json.encode("utf-8")).hexdigest()[:16]
+    version_suffix = (
+        payload.version_suffix if payload.version_suffix is not None else str(defaults["version_suffix"])
+    ).strip()
 
-    debloat_disabled = payload.debloat_disabled or []
     mods_disabled = payload.mods_disabled
     mods_disabled_json = None
     mods_signature = ""
     if mods_disabled is not None:
-        valid_mod_ids = {x["id"] for x in parse_unica_mod_entries(_resolve_un1ca_root_path() or Path(settings.un1ca_root))}
+        valid_mod_ids = {x["id"] for x in parse_unica_mod_entries(_project_root(ws) or Path(ws.root))}
         unknown_mods = [x for x in mods_disabled if x not in valid_mod_ids]
         if unknown_mods:
             raise HTTPException(400, f"Unknown mod ids: {', '.join(unknown_mods[:5])}")
         mods_disabled_json = json.dumps(sorted(set(mods_disabled)), ensure_ascii=True)
         mods_signature = hashlib.sha256(mods_disabled_json.encode("utf-8")).hexdigest()[:16]
 
-    valid_debloat_ids = {x["id"] for x in parse_unica_debloat_entries(_resolve_un1ca_root_path() or Path(settings.un1ca_root))}
+    debloat_disabled = payload.debloat_disabled or []
+    valid_debloat_ids = {x["id"] for x in parse_unica_debloat_entries(_project_root(ws) or Path(ws.root))}
     if debloat_disabled:
         unknown = [x for x in debloat_disabled if x not in valid_debloat_ids]
         if unknown:
@@ -1545,18 +1656,41 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
     debloat_signature = hashlib.sha256(debloat_disabled_json.encode("utf-8")).hexdigest()[:16]
     debloat_add_system_signature = hashlib.sha256(debloat_add_system_json.encode("utf-8")).hexdigest()[:16]
     debloat_add_product_signature = hashlib.sha256(debloat_add_product_json.encode("utf-8")).hexdigest()[:16]
+
     ff_overrides_json = None
     ff_signature = ""
     if payload.ff_overrides:
-        ff_data = _collect_ff_defaults(payload.target, source_firmware, target_firmware)
+        ff_data = _collect_ff_defaults(ws, payload.target, source_firmware, target_firmware)
         valid_ff_keys = {entry["key"] for entry in ff_data.get("entries", []) if entry.get("key")}
-        invalid_keys = [k for k in payload.ff_overrides.keys() if k not in valid_ff_keys]
+        invalid_keys = [k for k in payload.ff_overrides if k not in valid_ff_keys]
         if invalid_keys:
             raise HTTPException(400, f"Unknown floating feature keys: {', '.join(invalid_keys[:5])}")
         normalized = {k: normalize_ff_value(v) for k, v in payload.ff_overrides.items()}
         ff_overrides_json = json.dumps(normalized, ensure_ascii=True, sort_keys=True)
         ff_signature = hashlib.sha256(ff_overrides_json.encode("utf-8")).hexdigest()[:16]
+
+    # The upload is only consumed once every other input has validated, so a
+    # rejected request does not burn the archive the user just uploaded
+    extra_mods_signature = ""
+    extra_mods_archive_path = None
+    extra_mods_modules_json = None
+    upload_meta = None
+    if payload.extra_mods_upload_id:
+        upload_meta = load_upload_meta(settings.data_dir, payload.extra_mods_upload_id)
+        if not upload_meta:
+            raise HTTPException(400, "Invalid extra_mods_upload_id")
+        if upload_meta.get("used"):
+            raise HTTPException(400, "This uploaded mods archive has already been used")
+        archive_path = upload_meta.get("archive_path")
+        if not archive_path or not Path(archive_path).exists():
+            raise HTTPException(400, "Uploaded mods archive file is missing")
+        extra_mods_archive_path = archive_path
+        modules = upload_meta.get("modules", [])
+        extra_mods_modules_json = json.dumps(modules, ensure_ascii=True)
+        extra_mods_signature = hashlib.sha256(extra_mods_modules_json.encode("utf-8")).hexdigest()[:16]
+
     build_signature = _build_signature(
+        ws.id,
         payload.target,
         source_commit,
         source_firmware,
@@ -1573,7 +1707,7 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
         ff_signature,
     )
 
-    # Reuse an already built artifact for the same build signature unless forced.
+    # Reuse an already built artifact for the same build signature unless forced
     if not payload.force and not payload.no_rom_zip:
         existing = (
             db.query(BuildJob)
@@ -1586,13 +1720,17 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
             .first()
         )
         if existing and existing.artifact_path and Path(existing.artifact_path).exists():
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             if extra_mods_archive_path:
                 try:
                     Path(extra_mods_archive_path).unlink(missing_ok=True)
                 except Exception:
                     pass
+            if upload_meta is not None and payload.extra_mods_upload_id:
+                upload_meta["used"] = True
+                save_upload_meta(settings.data_dir, payload.extra_mods_upload_id, upload_meta)
             job = BuildJob(
+                workspace_id=ws.id,
                 target=payload.target,
                 source_commit=source_commit,
                 source_firmware=source_firmware,
@@ -1621,9 +1759,15 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
             db.add(job)
             db.commit()
             db.refresh(job)
+            publish_job_event(job)
             return job
 
+    if upload_meta is not None and payload.extra_mods_upload_id:
+        upload_meta["used"] = True
+        save_upload_meta(settings.data_dir, payload.extra_mods_upload_id, upload_meta)
+
     job = BuildJob(
+        workspace_id=ws.id,
         target=payload.target,
         source_commit=source_commit,
         source_firmware=source_firmware,
@@ -1650,196 +1794,231 @@ async def create_job(payload: BuildJobCreate, db: Session = Depends(get_db)):
     job.queue_job_id = await _enqueue_build("build_job_task", job.id)
     db.commit()
     db.refresh(job)
+    publish_job_event(job)
     return job
 
 
-@app.get(f"{settings.api_prefix}/defaults")
-async def get_defaults(target: str | None = None):
-    # Этот endpoint кормит почти весь UI: target list, defaults, commit info, firmware statuses.
-    target_options = await asyncio.to_thread(_get_target_options)
+@app.get(f"{settings.api_prefix}/build/targets")
+async def build_targets(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    target_options = await asyncio.to_thread(_get_target_options, ws)
     targets = [str(x.get("code") or "") for x in target_options if x.get("code")]
     if not target_options:
-        targets = await asyncio.to_thread(_get_targets)
+        targets = await asyncio.to_thread(_get_targets, ws)
         target_options = [{"code": code, "name": code} for code in targets]
-    selected_target = target
-    if not selected_target:
-        selected_target = "b0s" if "b0s" in targets else (targets[0] if targets else "")
-    defaults = await asyncio.to_thread(_get_defaults_for_target, selected_target) if selected_target else {}
-    fw_info = await asyncio.to_thread(_collect_samsung_fw)
-    await asyncio.to_thread(_fill_latest_for_fw_items, fw_info["items"])
-    source_firmware = str(defaults.get("source_firmware", ""))
-    target_firmware = str(defaults.get("target_firmware", ""))
-    source_status, target_status = await asyncio.gather(
-        asyncio.to_thread(_make_firmware_status, source_firmware, fw_info["items"]),
-        asyncio.to_thread(_make_firmware_status, target_firmware, fw_info["items"]),
-    )
-    repo_info = await asyncio.to_thread(_repo_info_with_new_session)
-    commit_details = repo_info.get("commit") if isinstance(repo_info.get("commit"), dict) else {}
-    repo_sync = repo_info.get("repo_sync") if isinstance(repo_info.get("repo_sync"), dict) else {}
-    root = _resolve_un1ca_root_path()
+    selected = "b0s" if "b0s" in targets else (targets[0] if targets else "")
+    root = _project_root(ws)
     return {
+        "workspace_id": ws.id,
+        "fw_scope": ws.fw_scope,
         "targets": targets,
         "target_options": target_options,
-        "target": selected_target,
-        "defaults": defaults,
-        "current_commit": commit_details.get("short_hash") or (settings.source_commit or "unknown"),
-        "current_commit_subject": commit_details.get("subject") or "",
-        "current_commit_details": commit_details,
-        "latest_artifact_available": await asyncio.to_thread(_target_has_latest_artifact_with_new_session, selected_target),
-        "repo_sync": repo_sync,
-        "repo_info": repo_info,
-        "firmware_status": source_status,
-        "target_firmware_status": target_status,
+        "target": selected,
         "repo_root": str(root) if root else "",
     }
 
 
+@app.get(f"{settings.api_prefix}/build/defaults")
+async def build_defaults(target: str | None = None, workspace: str | None = None, db: Session = Depends(get_db)):
+    # Only the form values, so the build card does not wait on the firmware
+    # lookups that need the network
+    ws = _require_ws(db, workspace)
+    targets = await asyncio.to_thread(_get_targets, ws)
+    selected = target if target in targets else ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
+    defaults = await asyncio.to_thread(_get_defaults_for_target, ws, selected) if selected else {}
+    return {
+        "target": selected,
+        "defaults": defaults,
+        "latest_artifact_available": await asyncio.to_thread(
+            _target_has_latest_artifact_with_new_session, ws.id, selected
+        ),
+    }
+
+
+@app.get(f"{settings.api_prefix}/firmware/status")
+async def firmware_status_endpoint(
+    target: str | None = None, workspace: str | None = None, db: Session = Depends(get_db)
+):
+    ws = _require_ws(db, workspace)
+    targets = await asyncio.to_thread(_get_targets, ws)
+    selected = target if target in targets else ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
+    defaults = await asyncio.to_thread(_get_defaults_for_target, ws, selected) if selected else {}
+    fw_info = await asyncio.to_thread(_collect_samsung_fw, ws)
+    await asyncio.to_thread(_fill_latest_for_fw_items, fw_info["items"])
+    source_status, target_status = await asyncio.gather(
+        asyncio.to_thread(_make_firmware_status, str(defaults.get("source_firmware", "")), fw_info["items"]),
+        asyncio.to_thread(_make_firmware_status, str(defaults.get("target_firmware", "")), fw_info["items"]),
+    )
+    return {
+        "fw_scope": ws.fw_scope,
+        "firmware_status": source_status,
+        "target_firmware_status": target_status,
+    }
+
+
 @app.get(f"{settings.api_prefix}/repo/info")
-async def repo_info():
-    return await asyncio.to_thread(_repo_info_with_new_session)
+async def repo_info(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    return await asyncio.to_thread(_repo_info, ws)
 
 
 @app.patch(f"{settings.api_prefix}/repo/config")
-async def update_repo_config(payload: RepoConfigUpdate):
+async def update_repo_config(payload: RepoConfigUpdate, workspace: str | None = None, db: Session = Depends(get_db)):
     value = (payload.git_url or "").strip()
     if not re.match(r"^(https://|git@|ssh://).+", value):
         raise HTTPException(400, "Invalid git url")
-    return await asyncio.to_thread(
-        _update_repo_config_with_new_session,
-        value,
-        payload.git_username,
-        payload.git_token,
-    )
+    ws_row = ws_lib.get_workspace(db, workspace)
+    if ws_row is None:
+        raise HTTPException(400, "No workspace configured")
+    ws_row.git_url = value
+    if payload.git_ref is not None and payload.git_ref.strip():
+        ws_row.git_ref = payload.git_ref.strip()
+    if payload.git_username is not None:
+        ws_row.git_username = payload.git_username.strip()
+    if payload.git_token is not None:
+        ws_row.git_token = payload.git_token.strip()
+    db.commit()
+    db.refresh(ws_row)
+    _invalidate_repo_caches(ws_row.id)
+    return await asyncio.to_thread(_repo_info, ws_lib.snapshot(ws_row))
 
 
 @app.get(f"{settings.api_prefix}/settings/advanced")
-async def get_advanced_settings(target: str | None = None):
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    candidates = await asyncio.to_thread(_list_config_candidates, root)
-    preferred = await asyncio.to_thread(_preferred_source_configs_for_target, root, target or "")
-    auto_value, auto_source = await asyncio.to_thread(
-        _read_source_firmware_from_configs_with_source,
-        root,
-        None,
-        preferred,
-    )
-    override = await asyncio.to_thread(_get_source_config_override)
-    targets_override = await asyncio.to_thread(_get_setting_value, "targets_override")
-    targets_detected = await asyncio.to_thread(_get_targets_detected)
-    targets_effective = await asyncio.to_thread(_get_targets)
+async def get_advanced_settings(target: str | None = None, workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    return await asyncio.to_thread(_advanced_settings_payload, ws, target)
+
+
+def _advanced_settings_payload(ws: WorkspaceRef, target: str | None) -> dict:
+    root = _project_root(ws) or Path(ws.root)
+    candidates = _list_config_candidates(root)
+    preferred = _preferred_source_configs_for_target(root, target or "")
+    auto_value, auto_source = _read_source_firmware_from_configs_with_source(root, None, preferred)
     return {
         "source_config_candidates": candidates,
-        "source_config_override": override,
+        "source_config_override": ws.source_config_override,
         "source_config_auto": auto_source,
         "source_firmware_auto": auto_value,
         "source_config_preferred": preferred,
-        "targets_override": (targets_override or "").strip(),
-        "targets_detected": targets_detected,
-        "targets_effective": targets_effective,
+        "targets_override": ws.targets_override,
+        "targets_detected": _get_targets_detected(ws),
+        "targets_effective": _get_targets(ws),
     }
 
 
 @app.patch(f"{settings.api_prefix}/settings/advanced")
-async def update_advanced_settings(payload: AdvancedSettingsUpdate, target: str | None = None):
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
-    candidates = await asyncio.to_thread(_list_config_candidates, root)
-    candidate_names = {str(x.get("name") or "") for x in candidates}
-    db = SessionLocal()
-    try:
-        if payload.source_config_override is not None:
-            value = (payload.source_config_override or "").strip()
-            if value.lower() in ("", "auto", "none"):
-                _delete_setting(db, "source_config_override")
-            else:
-                if value not in candidate_names:
-                    raise HTTPException(400, "Unknown source config override")
-                _set_setting(db, "source_config_override", value)
+async def update_advanced_settings(
+    payload: AdvancedSettingsUpdate,
+    target: str | None = None,
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    ws_row = ws_lib.get_workspace(db, workspace)
+    if ws_row is None:
+        raise HTTPException(400, "No workspace configured")
+    ws = ws_lib.snapshot(ws_row)
+    root = _project_root(ws) or Path(ws.root)
+    candidate_names = {str(x.get("name") or "") for x in _list_config_candidates(root)}
 
-        if payload.targets_override is not None:
-            raw = (payload.targets_override or "").strip()
-            if not raw:
-                _delete_setting(db, "targets_override")
-            else:
-                _set_setting(db, "targets_override", raw)
-    finally:
-        db.close()
+    if payload.source_config_override is not None:
+        value = (payload.source_config_override or "").strip()
+        if value.lower() in ("", "auto", "none"):
+            ws_row.source_config_override = ""
+        else:
+            if value not in candidate_names:
+                raise HTTPException(400, "Unknown source config override")
+            ws_row.source_config_override = value
 
-    preferred = await asyncio.to_thread(_preferred_source_configs_for_target, root, target or "")
-    auto_value, auto_source = await asyncio.to_thread(
-        _read_source_firmware_from_configs_with_source,
-        root,
-        None,
-        preferred,
-    )
-    override = await asyncio.to_thread(_get_source_config_override)
-    targets_override = await asyncio.to_thread(_get_setting_value, "targets_override")
-    targets_detected = await asyncio.to_thread(_get_targets_detected)
-    targets_effective = await asyncio.to_thread(_get_targets)
-    return {
-        "source_config_candidates": candidates,
-        "source_config_override": override,
-        "source_config_auto": auto_source,
-        "source_firmware_auto": auto_value,
-        "source_config_preferred": preferred,
-        "targets_override": (targets_override or "").strip(),
-        "targets_detected": targets_detected,
-        "targets_effective": targets_effective,
-    }
+    if payload.targets_override is not None:
+        ws_row.targets_override = (payload.targets_override or "").strip()
+
+    db.commit()
+    db.refresh(ws_row)
+    return await asyncio.to_thread(_advanced_settings_payload, ws_lib.snapshot(ws_row), target)
 
 
 @app.post(f"{settings.api_prefix}/repo/clone", response_model=BuildJobRead)
-async def repo_clone(db: Session = Depends(get_db)):
-    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
-    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
-    git_username = _get_setting(db, "repo.git_username", "")
-    git_token = _get_setting(db, "repo.git_token", "")
-    auth_url = _git_url_with_auth(git_url, git_username, git_token)
-    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo clone: {_safe_git_url(git_url)}")
-    _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, auth_url, git_ref, git_username, git_token)
+async def repo_clone(fresh: bool = False, workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    if not ws.git_url:
+        raise HTTPException(400, "Workspace has no git url configured")
+    label = "Repo re-clone" if fresh else "Repo clone"
+    op_job = _create_operation_job(
+        db,
+        workspace_id=ws.id,
+        target="repo",
+        operation_name=f"{label}: {_safe_git_url(ws.git_url)}",
+    )
+    _invalidate_repo_caches(ws.id)
+    op_job.queue_job_id = await _enqueue_build("repo_clone_job_task", op_job.id, bool(fresh))
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.post(f"{settings.api_prefix}/repo/pull", response_model=BuildJobRead)
-async def repo_pull(db: Session = Depends(get_db)):
-    git_ref = _get_setting(db, "repo.git_ref", settings.repo_ref_default)
-    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
-    git_username = _get_setting(db, "repo.git_username", "")
-    git_token = _get_setting(db, "repo.git_token", "")
-    op_job = _create_operation_job(db, target="repo", operation_name=f"Repo pull: {git_ref}")
-    _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_pull_job_task", op_job.id, git_ref, git_url, git_username, git_token)
+async def repo_pull(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    op_job = _create_operation_job(db, workspace_id=ws.id, target="repo", operation_name=f"Repo pull: {ws.git_ref}")
+    _invalidate_repo_caches(ws.id)
+    op_job.queue_job_id = await _enqueue_build("repo_pull_job_task", op_job.id)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.post(f"{settings.api_prefix}/repo/submodules", response_model=BuildJobRead)
-async def repo_submodules(db: Session = Depends(get_db)):
-    git_url = _get_setting(db, "repo.git_url", settings.repo_url_default)
-    git_username = _get_setting(db, "repo.git_username", "")
-    git_token = _get_setting(db, "repo.git_token", "")
-    op_job = _create_operation_job(db, target="repo", operation_name="Repo submodules update")
-    _invalidate_repo_caches()
-    op_job.queue_job_id = await _enqueue_build("repo_submodules_job_task", op_job.id, git_url, git_username, git_token)
+async def repo_submodules(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    op_job = _create_operation_job(db, workspace_id=ws.id, target="repo", operation_name="Repo submodules update")
+    _invalidate_repo_caches(ws.id)
+    op_job.queue_job_id = await _enqueue_build("repo_submodules_job_task", op_job.id)
     db.commit()
     db.refresh(op_job)
     return op_job
 
 
 @app.delete(f"{settings.api_prefix}/repo", response_model=BuildJobRead)
-async def repo_delete(mode: str = "repo_only", db: Session = Depends(get_db)):
+async def repo_delete(mode: str = "repo_only", workspace: str | None = None, db: Session = Depends(get_db)):
     if mode not in {"repo_only", "repo_with_out"}:
         raise HTTPException(400, "mode must be repo_only or repo_with_out")
+    ws = _require_ws(db, workspace)
     op_name = "Repo delete (keep out)" if mode == "repo_only" else "Repo delete (with out)"
-    op_job = _create_operation_job(db, target="repo", operation_name=op_name)
-    _invalidate_repo_caches()
+    op_job = _create_operation_job(db, workspace_id=ws.id, target="repo", operation_name=op_name)
+    _invalidate_repo_caches(ws.id)
     op_job.queue_job_id = await _enqueue_build("repo_delete_job_task", op_job.id, mode)
     db.commit()
     db.refresh(op_job)
     return op_job
+
+
+async def _pump_pubsub(websocket: WebSocket, channel: str, snapshot: dict, error_label: str):
+    # One shared loop for all three progress streams: send a snapshot, then relay
+    # everything published on the channel until the client goes away
+    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    try:
+        await websocket.send_json(snapshot)
+        await asyncio.to_thread(pubsub.subscribe, channel)
+        while True:
+            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+            if message and message.get("type") == "message":
+                data = message.get("data")
+                try:
+                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
+                except Exception:
+                    payload = {"type": "error", "message": error_label}
+                await websocket.send_json(payload)
+            await asyncio.sleep(0.1)
+    except WebSocketDisconnect:
+        pass
+    except RuntimeError:
+        # Socket closed while a send was in flight
+        pass
+    finally:
+        try:
+            await asyncio.to_thread(pubsub.close)
+        except Exception:
+            pass
 
 
 @app.websocket(f"{settings.api_prefix}/repo/progress/ws")
@@ -1848,69 +2027,57 @@ async def stream_repo_progress_ws(websocket: WebSocket):
     if not _require_ws_auth(websocket):
         await websocket.close(code=4401)
         return
-    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
-    try:
-        snapshot = await asyncio.to_thread(get_repo_progress)
-        await websocket.send_json({"type": "snapshot", "item": snapshot})
-        await asyncio.to_thread(pubsub.subscribe, REPO_PROGRESS_CHANNEL)
-        while True:
-            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message.get("data")
-                try:
-                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
-                except Exception:
-                    payload = {"type": "error", "message": "bad repo progress payload"}
-                await websocket.send_json(payload)
-            await asyncio.sleep(0.1)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        try:
-            await asyncio.to_thread(pubsub.close)
-        except Exception:
-            pass
+    items = await asyncio.to_thread(list_repo_progress)
+    await _pump_pubsub(
+        websocket,
+        REPO_PROGRESS_CHANNEL,
+        {"type": "snapshot", "items": list(items.values())},
+        "bad repo progress payload",
+    )
 
 
 @app.get(f"{settings.api_prefix}/debloat/options")
-async def get_debloat_options():
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+async def get_debloat_options(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    root = _project_root(ws) or Path(ws.root)
     entries = await asyncio.to_thread(parse_unica_debloat_entries, root)
     return {"entries": entries}
 
 
 @app.get(f"{settings.api_prefix}/floating/features")
-async def get_floating_features(target: str):
-    if target not in _get_targets():
+async def get_floating_features(target: str, workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    if target not in _get_targets(ws):
         raise HTTPException(400, "Unknown target")
-    defaults = await asyncio.to_thread(_get_defaults_for_target, target)
+    defaults = await asyncio.to_thread(_get_defaults_for_target, ws, target)
     source_firmware = str(defaults.get("source_firmware", ""))
     target_firmware = str(defaults.get("target_firmware", ""))
-    data = await asyncio.to_thread(_collect_ff_defaults, target, source_firmware, target_firmware)
-    return data
+    return await asyncio.to_thread(_collect_ff_defaults, ws, target, source_firmware, target_firmware)
 
 
 @app.get(f"{settings.api_prefix}/mods/options")
-async def get_mods_options():
-    root = _resolve_un1ca_root_path() or Path(settings.un1ca_root)
+async def get_mods_options(workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    root = _project_root(ws) or Path(ws.root)
     entries = await asyncio.to_thread(parse_unica_mod_entries, root)
     return {"entries": entries}
 
 
 @app.get(f"{settings.api_prefix}/firmware/samsung")
-async def get_samsung_fw():
-    # Данные для модалки Samsung FW: кэш, размеры, latest version, update_available.
-    items = (await asyncio.to_thread(_collect_samsung_fw))["items"]
+async def get_samsung_fw(workspace: str | None = None, db: Session = Depends(get_db)):
+    # Firmware screen data: cache contents, sizes, latest version, update_available
+    ws = _require_ws(db, workspace)
+    items = (await asyncio.to_thread(_collect_samsung_fw, ws))["items"]
     await asyncio.to_thread(_fill_latest_for_fw_items, items)
-    progress = list_progress()
+    progress = await asyncio.to_thread(list_progress)
     for item in items:
         latest = str(item.get("latest_version") or "")
         item["latest_version"] = latest
         downloaded = str(item.get("odin_version") or "")
         extracted = str(item.get("fw_version") or "")
         item["update_available"] = bool(latest and downloaded and downloaded != latest and extracted != latest)
-        item["progress"] = progress.get(str(item.get("key") or ""))
-    return {"items": items}
+        item["progress"] = progress.get(progress_key(ws.fw_scope, str(item.get("key") or "")))
+    return {"items": items, "fw_scope": ws.fw_scope, "shared_fw_cache": ws.shared_fw_cache}
 
 
 @app.websocket(f"{settings.api_prefix}/firmware/progress/ws")
@@ -1919,28 +2086,174 @@ async def stream_firmware_progress_ws(websocket: WebSocket):
     if not _require_ws_auth(websocket):
         await websocket.close(code=4401)
         return
-    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+    progress = await asyncio.to_thread(list_progress)
+    await _pump_pubsub(
+        websocket,
+        PROGRESS_CHANNEL,
+        {"type": "snapshot", "items": list(progress.values())},
+        "bad firmware progress payload",
+    )
+
+
+# The sections the state stream can deliver. Each one is computed and sent on
+# its own, so a slow firmware lookup never delays the build form
+STATE_SECTIONS = ("targets", "defaults", "firmware", "repo", "jobs")
+
+
+def _state_section(section: str, workspace_id: str | None, target: str | None) -> dict:
+    db = SessionLocal()
     try:
-        progress = await asyncio.to_thread(list_progress)
-        await websocket.send_json({"type": "snapshot", "items": list(progress.values())})
-        await asyncio.to_thread(pubsub.subscribe, PROGRESS_CHANNEL)
+        ws = _require_ws(db, workspace_id)
+    finally:
+        db.close()
+
+    if section == "targets":
+        target_options = _get_target_options(ws)
+        targets = [str(x.get("code") or "") for x in target_options if x.get("code")]
+        if not target_options:
+            targets = _get_targets(ws)
+            target_options = [{"code": code, "name": code} for code in targets]
+        root = _project_root(ws)
+        return {
+            "workspace_id": ws.id,
+            "fw_scope": ws.fw_scope,
+            "targets": targets,
+            "target_options": target_options,
+            "target": "b0s" if "b0s" in targets else (targets[0] if targets else ""),
+            "repo_root": str(root) if root else "",
+        }
+
+    targets = _get_targets(ws)
+    selected = target if target in targets else ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
+
+    if section == "defaults":
+        defaults = _get_defaults_for_target(ws, selected) if selected else {}
+        return {
+            "target": selected,
+            "defaults": defaults,
+            "latest_artifact_available": _target_has_latest_artifact_with_new_session(ws.id, selected),
+        }
+
+    if section == "firmware":
+        defaults = _get_defaults_for_target(ws, selected) if selected else {}
+        fw_info = _collect_samsung_fw(ws)
+        _fill_latest_for_fw_items(fw_info["items"])
+        return {
+            "fw_scope": ws.fw_scope,
+            "firmware_status": _make_firmware_status(str(defaults.get("source_firmware", "")), fw_info["items"]),
+            "target_firmware_status": _make_firmware_status(str(defaults.get("target_firmware", "")), fw_info["items"]),
+        }
+
+    if section == "repo":
+        return _repo_info(ws)
+
+    if section == "jobs":
+        jobs = _list_jobs_with_new_session(ws.id, 50)
+        return {"items": [BuildJobRead.model_validate(job).model_dump(mode="json") for job in jobs]}
+
+    raise HTTPException(400, f"Unknown section: {section}")
+
+
+@app.websocket(f"{settings.api_prefix}/state/ws")
+async def stream_state_ws(websocket: WebSocket):
+    # The default transport for everything the UI shows: sections are pushed on
+    # connect and again whenever a job moves. The REST endpoints stay as the
+    # fallback for when a websocket cannot be established at all
+    await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
+
+    ctx = {
+        "workspace": websocket.query_params.get("workspace") or None,
+        "target": websocket.query_params.get("target") or None,
+    }
+    send_lock = asyncio.Lock()
+
+    async def send(payload: dict):
+        async with send_lock:
+            await websocket.send_json(payload)
+
+    async def send_section(section: str):
+        try:
+            data = await asyncio.to_thread(_state_section, section, ctx["workspace"], ctx["target"])
+        except HTTPException as exc:
+            await send({"type": "section_error", "section": section, "message": str(exc.detail)})
+            return
+        except Exception as exc:
+            await send({"type": "section_error", "section": section, "message": str(exc)})
+            return
+        await send({"type": "section", "section": section, "data": data})
+
+    async def send_sections(sections):
+        await asyncio.gather(*[send_section(name) for name in sections])
+
+    async def pubsub_loop():
+        pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
+        try:
+            await asyncio.to_thread(pubsub.subscribe, JOB_EVENTS_CHANNEL)
+            while True:
+                message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
+                if message and message.get("type") == "message":
+                    raw = message.get("data")
+                    try:
+                        event = json.loads(raw.decode("utf-8") if isinstance(raw, bytes) else str(raw))
+                    except Exception:
+                        continue
+                    if ctx["workspace"] and event.get("workspace_id") not in ("", None, ctx["workspace"]):
+                        continue
+                    await send({"type": "job", "job": event})
+                    sections = ["jobs"]
+                    if event.get("job_kind") == "operation" and event.get("status") in _TERMINAL_JOB_STATES:
+                        sections += ["repo", "firmware", "targets", "defaults"]
+                    await send_sections(sections)
+                await asyncio.sleep(0.05)
+        except asyncio.CancelledError:
+            raise
+        finally:
+            try:
+                await asyncio.to_thread(pubsub.close)
+            except Exception:
+                pass
+
+    async def client_loop():
         while True:
-            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message.get("data")
-                try:
-                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
-                except Exception:
-                    payload = {"type": "error", "message": "bad firmware progress payload"}
-                await websocket.send_json(payload)
-            await asyncio.sleep(0.1)
+            payload = await websocket.receive_json()
+            action = str(payload.get("action") or "")
+            if action == "subscribe":
+                if "workspace" in payload:
+                    ctx["workspace"] = payload.get("workspace") or None
+                if "target" in payload:
+                    ctx["target"] = payload.get("target") or None
+                requested = payload.get("sections") or list(STATE_SECTIONS)
+                await send_sections([x for x in requested if x in STATE_SECTIONS])
+            elif action == "refresh":
+                requested = payload.get("sections") or list(STATE_SECTIONS)
+                await send_sections([x for x in requested if x in STATE_SECTIONS])
+
+    await send({"type": "ready"})
+    await send_sections(STATE_SECTIONS)
+
+    tasks = [asyncio.create_task(pubsub_loop()), asyncio.create_task(client_loop())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     except WebSocketDisconnect:
         pass
     finally:
-        try:
-            await asyncio.to_thread(pubsub.close)
-        except Exception:
-            pass
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
+@app.websocket(f"{settings.api_prefix}/jobs/events/ws")
+async def stream_job_events_ws(websocket: WebSocket):
+    # Replaces polling the jobs list: every status change is announced here, and
+    # the client only refetches when something actually moved
+    await websocket.accept()
+    if not _require_ws_auth(websocket):
+        await websocket.close(code=4401)
+        return
+    await _pump_pubsub(websocket, JOB_EVENTS_CHANNEL, {"type": "ready"}, "bad job event payload")
 
 
 @app.websocket(f"{settings.api_prefix}/build/progress/ws")
@@ -1949,46 +2262,38 @@ async def stream_build_progress_ws(websocket: WebSocket):
     if not _require_ws_auth(websocket):
         await websocket.close(code=4401)
         return
-    pubsub = redis_conn.pubsub(ignore_subscribe_messages=True)
-    try:
-        progress = await asyncio.to_thread(list_build_progress)
-        await websocket.send_json({"type": "snapshot", "items": list(progress.values())})
-        await asyncio.to_thread(pubsub.subscribe, BUILD_PROGRESS_CHANNEL)
-        while True:
-            message = await asyncio.to_thread(pubsub.get_message, timeout=1.0)
-            if message and message.get("type") == "message":
-                data = message.get("data")
-                try:
-                    payload = json.loads(data.decode("utf-8") if isinstance(data, bytes) else str(data))
-                except Exception:
-                    payload = {"type": "error", "message": "bad build progress payload"}
-                await websocket.send_json(payload)
-            await asyncio.sleep(0.1)
-    except WebSocketDisconnect:
-        pass
-    finally:
-        try:
-            await asyncio.to_thread(pubsub.close)
-        except Exception:
-            pass
+    progress = await asyncio.to_thread(list_build_progress)
+    await _pump_pubsub(
+        websocket,
+        BUILD_PROGRESS_CHANNEL,
+        {"type": "snapshot", "items": list(progress.values())},
+        "bad build progress payload",
+    )
 
 
 @app.delete(f"{settings.api_prefix}/firmware/samsung/{{fw_type}}/{{fw_key}}", response_model=BuildJobRead)
-async def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
-    # Удаление делает operation-job через очередь, чтобы action был логируемый и отменяемый.
+async def delete_samsung_fw_entry(
+    fw_type: str,
+    fw_key: str,
+    target: str | None = None,
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    # Deletion runs as a queued operation job so it is logged and cancellable
     if fw_type not in {"odin", "fw"}:
         raise HTTPException(400, "fw_type must be 'odin' or 'fw'")
     if not re.fullmatch(r"[A-Za-z0-9._-]+", fw_key):
         raise HTTPException(400, "Invalid fw key")
 
-    targets = _get_targets()
+    ws = _require_ws(db, workspace)
+    targets = _get_targets(ws)
     selected_target = target or ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
     if not selected_target:
         raise HTTPException(400, "No targets available")
     if selected_target not in targets:
         raise HTTPException(400, "Unknown target")
 
-    base = Path(settings.out_dir) / ("odin" if fw_type == "odin" else "fw")
+    base = Path(ws.out) / ("odin" if fw_type == "odin" else "fw")
     fw_path = base / fw_key
     if not fw_path.exists():
         raise HTTPException(404, "FW entry not found")
@@ -1997,6 +2302,7 @@ async def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None 
 
     op_job = _create_operation_job(
         db,
+        workspace_id=ws.id,
         target=selected_target,
         operation_name=f"Delete {fw_type.upper()} FW entry: {fw_key}",
     )
@@ -2007,24 +2313,31 @@ async def delete_samsung_fw_entry(fw_type: str, fw_key: str, target: str | None 
 
 
 @app.post(f"{settings.api_prefix}/firmware/samsung/{{fw_key}}/extract", response_model=BuildJobRead)
-async def extract_samsung_fw(fw_key: str, target: str | None = None, db: Session = Depends(get_db)):
-    # Extract тоже идет через очередь: heavy I/O, long runtime, нужны логи и статус.
+async def extract_samsung_fw(
+    fw_key: str,
+    target: str | None = None,
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    # Extract is queued too: heavy I/O and a long runtime need logs and a status
     if not re.fullmatch(r"[A-Za-z0-9._-]+", fw_key):
         raise HTTPException(400, "Invalid fw key")
 
-    targets = _get_targets()
+    ws = _require_ws(db, workspace)
+    targets = _get_targets(ws)
     selected_target = target or ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
     if not selected_target:
         raise HTTPException(400, "No targets available")
     if selected_target not in targets:
         raise HTTPException(400, "Unknown target")
 
-    odin_dir = Path(settings.out_dir) / "odin" / fw_key
+    odin_dir = Path(ws.out) / "odin" / fw_key
     if not odin_dir.is_dir():
         raise HTTPException(404, "ODIN FW entry not found")
 
     op_job = _create_operation_job(
         db,
+        workspace_id=ws.id,
         target=selected_target,
         operation_name=f"Extract FW (-f): {fw_key}",
     )
@@ -2067,8 +2380,9 @@ async def upload_mods_archive(file: UploadFile = File(...)):
 
 
 @app.get(f"{settings.api_prefix}/jobs", response_model=list[BuildJobRead])
-async def list_jobs(limit: int = 50):
-    return await asyncio.to_thread(_list_jobs_with_new_session, limit)
+async def list_jobs(limit: int = 50, workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    return await asyncio.to_thread(_list_jobs_with_new_session, ws.id, limit)
 
 
 @app.get(f"{settings.api_prefix}/jobs/{{job_id}}", response_model=BuildJobRead)
@@ -2086,21 +2400,30 @@ async def download_artifact(job_id: str):
 
 
 @app.get(f"{settings.api_prefix}/artifacts/latest/{{target}}")
-async def download_latest_artifact_for_target(target: str):
-    # Берем последний успешный/reused artifact по target для кнопки Latest ZIP.
-    p = await asyncio.to_thread(_get_latest_artifact_path_for_target_with_new_session, target)
+async def download_latest_artifact_for_target(target: str, workspace: str | None = None, db: Session = Depends(get_db)):
+    # Latest successful/reused artifact for the target, behind the Latest ZIP button
+    ws = _require_ws(db, workspace)
+    if target not in _get_targets(ws):
+        raise HTTPException(400, "Unknown target")
+    p = await asyncio.to_thread(_get_latest_artifact_path_for_target, ws.id, target)
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
 
 
 @app.get(f"{settings.api_prefix}/artifacts/history")
-async def artifacts_history(target: str | None = None, limit: int = 50):
-    items = await asyncio.to_thread(_list_artifacts_with_new_session, target, limit)
+async def artifacts_history(
+    target: str | None = None,
+    limit: int = 50,
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    ws = _require_ws(db, workspace)
+    items = await asyncio.to_thread(_list_artifacts_with_new_session, ws.id, target, limit)
     return {"items": items}
 
 
 @app.post(f"{settings.api_prefix}/jobs/{{job_id}}/stop", response_model=BuildJobRead)
 async def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Session = Depends(get_db)):
-    # Stop running job идет в control queue, потому что signal должен отправлять worker (same PID namespace).
+    # Stopping a running job goes to the control queue: only the worker shares its PID namespace
     job = db.get(BuildJob, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
@@ -2113,16 +2436,16 @@ async def stop_job(job_id: str, payload: StopJobRequest | None = None, db: Sessi
     if job.status == "queued":
         job.status = "canceled"
         job.error = "Build canceled by user (queued job)"
-        job.finished_at = datetime.now(timezone.utc)
+        job.finished_at = datetime.now(UTC)
         db.commit()
         db.refresh(job)
+        publish_job_event(job)
         return job
 
     # Running jobs are stopped from worker-side control queue to avoid PID namespace issues in API container.
+    # The worker owns job.error from here on: writing an outcome now would report
+    # a stop that has not happened yet
     await _enqueue_control("stop_job_task", job.id, signal_type)
-    job.error = f"Stop requested by user ({signal_type.upper()})"
-    db.commit()
-    db.refresh(job)
     return job
 
 
@@ -2132,8 +2455,8 @@ async def job_hints(job_id: str):
     if not job or not job.log_path:
         raise HTTPException(404, "Log file not found")
     log_path = Path(job.log_path)
-    text = await asyncio.to_thread(_read_log_tail_text, log_path, 512)
-    hints = detect_build_hints(text)
+    log_text = await asyncio.to_thread(_read_log_tail_text, log_path, 512)
+    hints = detect_build_hints(log_text)
     return {"hints": hints}
 
 
@@ -2178,8 +2501,11 @@ def _read_log_tail_text(path: Path, tail_kb: int = 256) -> str:
     if not path.exists():
         return ""
     pos = _tail_log_start_pos(path, tail_kb)
-    text, _ = _read_log_chunk(path, pos)
-    return text
+    chunk, _ = _read_log_chunk(path, pos)
+    return chunk
+
+
+_TERMINAL_JOB_STATES = {"succeeded", "failed", "canceled", "reused"}
 
 
 @app.websocket(f"{settings.api_prefix}/jobs/{{job_id}}/ws")
@@ -2211,12 +2537,18 @@ async def stream_logs_ws(websocket: WebSocket, job_id: str, tail_kb: int = 256):
             current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
             status = str(current.get("status") or "")
 
-            if status in {"succeeded", "failed", "canceled"}:
+            if status in _TERMINAL_JOB_STATES:
+                # Drain whatever the process wrote between the last read and exit
+                tail, pos = await asyncio.to_thread(_read_log_chunk, log_path, pos)
+                if tail:
+                    await websocket.send_json({"type": "chunk", "chunk": tail})
                 await websocket.send_json({"type": "done", "status": status})
                 break
 
             await asyncio.sleep(1)
     except WebSocketDisconnect:
+        pass
+    except RuntimeError:
         pass
 
 
@@ -2241,7 +2573,7 @@ async def stream_logs(job_id: str, db: Session = Depends(get_db)):
 
             current = await asyncio.to_thread(_get_job_log_snapshot, job_id)
             status = str(current.get("status") or "")
-            if status in {"succeeded", "failed", "canceled"}:
+            if status in _TERMINAL_JOB_STATES:
                 yield "event: done\ndata: build_finished\n\n"
                 break
 

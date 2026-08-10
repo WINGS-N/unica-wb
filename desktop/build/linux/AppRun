@@ -1,0 +1,7 @@
+#!/bin/sh
+# The compose files and seed images travel inside the image, so the launcher is
+# told where they landed instead of guessing from the binary path
+HERE="$(dirname "$(readlink -f "$0")")"
+export UNICA_WB_ROOT="${UNICA_WB_ROOT:-$HERE/usr/share/unica-wb}"
+export PATH="$HERE/usr/bin:$PATH"
+exec "$HERE/usr/bin/unica-wb" "$@"

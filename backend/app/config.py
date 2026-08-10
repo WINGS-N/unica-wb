@@ -10,8 +10,16 @@ class Settings(BaseSettings):
     redis_url: str = "redis://redis:6379/0"
     database_url: str = "sqlite:////data/app.db"
 
+    # Legacy single-workspace paths. They stay meaningful as the source of the
+    # migrated default workspace; every new workspace lives under workspaces_root
     un1ca_root: str = "/workspace"
     out_dir: str = "/workspace/out"
+
+    # Parent directory that holds one sub-directory per workspace
+    workspaces_root: str = "/workspace"
+    # Sub-directory of workspaces_root that holds the odin/fw cache shared by
+    # every workspace with shared_fw_cache enabled
+    shared_cache_dirname: str = "_shared"
 
     data_dir: str = "/data"
     logs_dir: str = "/data/logs"

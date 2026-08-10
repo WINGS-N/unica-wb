@@ -2,18 +2,985 @@
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color-scheme: dark;
+/* =========================================================================
+   FONTS - Samsung Sharp Sans (headings) + SamsungOne (everything else).
+   Shipped in public/fonts
+   ========================================================================= */
+
+@font-face {
+  font-family: 'SamsungOne';
+  src: url('/fonts/samsungone_400.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
 }
 
-html,
-body,
-#app {
-  min-height: 100%;
+@font-face {
+  font-family: 'SamsungOne';
+  src: url('/fonts/samsungone_700.ttf') format('truetype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
 }
 
-body {
-  overflow-y: auto;
+@font-face {
+  font-family: 'SamsungSharpSans';
+  src: url('/fonts/samsungsharpsans_medium.otf') format('opentype');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'SamsungSharpSans';
+  src: url('/fonts/samsungsharpsans_bold.otf') format('opentype');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* =========================================================================
+   BASE - pure-black canvas, no gradients
+   ========================================================================= */
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  * {
+    box-sizing: border-box;
+  }
+
+  html,
+  body,
+  #app {
+    @apply h-full bg-un1ca-page;
+  }
+
+  body {
+    @apply m-0 overflow-hidden font-samsung text-un1ca-text antialiased;
+  }
+
+  /* Phone-like chrome: the real scrollers are the panes inside the shell */
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  *::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+    display: none;
+  }
+
+  body * {
+    min-width: 0;
+  }
+
+  h1,
+  h2,
+  h3 {
+    @apply m-0 font-sharp;
+    letter-spacing: -0.005em;
+  }
+
+  a {
+    color: inherit;
+  }
+
+  ::selection {
+    background: rgba(18, 89, 209, 0.45);
+  }
+}
+
+@layer components {
+  /* =====================================================================
+     SHELL - scrollable view area + bottom tab bar
+     ===================================================================== */
+
+  .app-shell {
+    @apply flex h-full flex-col overflow-clip bg-un1ca-page text-un1ca-text;
+  }
+
+  .app-main {
+    @apply min-h-0 flex-1 overflow-y-auto;
+  }
+
+  /* Top bar and tab bar share the page container so they line up with the
+     content column instead of stretching across a wide desktop window */
+  .app-bar {
+    @apply shrink-0 border-b border-un1ca-divider bg-un1ca-page;
+    padding-top: max(env(safe-area-inset-top), 8px);
+  }
+
+  .app-bar-inner {
+    @apply mx-auto flex w-full items-center gap-2 pb-2;
+    max-width: 1240px;
+    padding-left: max(env(safe-area-inset-left), 16px);
+    padding-right: max(env(safe-area-inset-right), 16px);
+  }
+
+  @media (min-width: 768px) {
+    .app-bar-inner {
+      padding-left: 32px;
+      padding-right: 32px;
+    }
+  }
+
+  .app-nav {
+    @apply shrink-0 border-t border-un1ca-divider bg-un1ca-page pt-2;
+    padding-bottom: max(env(safe-area-inset-bottom), 6px);
+  }
+
+  .app-nav-inner {
+    @apply mx-auto flex w-full items-stretch px-1;
+    max-width: 620px;
+  }
+
+  .app-nav-item {
+    @apply flex flex-1 flex-col items-center gap-1 rounded-xl py-1.5 text-un1ca-muted transition-colors;
+  }
+
+  .app-nav-item.is-active {
+    @apply text-un1ca-accent;
+  }
+
+  .app-nav-label {
+    @apply text-[11px] font-medium leading-none;
+  }
+
+  .app-nav-dot {
+    @apply absolute -right-1.5 -top-0.5 h-2.5 w-2.5 rounded-full border-2 border-un1ca-page;
+  }
+
+  /* Page scaffolding inside a tab or a full-screen overlay */
+  .page {
+    @apply mx-auto flex w-full flex-col gap-4 pb-10;
+    max-width: 1240px;
+    padding-left: max(env(safe-area-inset-left), 16px);
+    padding-right: max(env(safe-area-inset-right), 16px);
+    padding-top: 18px;
+  }
+
+  @media (min-width: 768px) {
+    .page {
+      @apply gap-5;
+      padding-left: 32px;
+      padding-right: 32px;
+      padding-top: 26px;
+    }
+  }
+
+  .page-wide {
+    max-width: 1560px;
+  }
+
+  .page-head {
+    @apply flex flex-wrap items-end justify-between gap-x-6 gap-y-3;
+  }
+
+  .page-title {
+    @apply font-sharp font-bold leading-[1.1] tracking-[-0.005em] text-un1ca-text;
+    font-size: clamp(24px, 3vw, 30px);
+    overflow-wrap: anywhere;
+  }
+
+  .page-subtitle {
+    @apply mt-1 text-[13px] leading-snug text-un1ca-muted;
+  }
+
+  .section-kicker {
+    @apply text-[11px] font-bold uppercase tracking-[0.14em] text-un1ca-kicker;
+  }
+
+  /* Full-screen overlay view: back arrow + title, then a scrolling body */
+  .overlay-view {
+    @apply flex h-full min-h-0 flex-col bg-un1ca-page;
+  }
+
+  .overlay-head {
+    @apply flex shrink-0 items-center gap-3 border-b border-un1ca-divider px-3 py-3;
+    padding-top: max(env(safe-area-inset-top), 12px);
+  }
+
+  .overlay-title {
+    @apply min-w-0 flex-1 truncate font-sharp text-[19px] font-bold tracking-[-0.005em];
+  }
+
+  .overlay-body {
+    @apply min-h-0 flex-1 overflow-y-auto;
+  }
+
+  /* =====================================================================
+     SURFACES
+     ===================================================================== */
+
+  .surface-card {
+    @apply rounded-[24px] border border-un1ca-border bg-un1ca-card p-5 text-un1ca-text shadow-card;
+    max-width: 100%;
+  }
+
+  @media (min-width: 768px) {
+    .surface-card {
+      @apply rounded-[28px] p-7;
+    }
+  }
+
+  .surface-inset {
+    @apply rounded-[20px] border border-un1ca-border bg-un1ca-surface p-4;
+  }
+
+  .card-title {
+    @apply font-sharp text-[20px] font-bold tracking-[-0.005em];
+  }
+
+  .card-header {
+    @apply flex flex-wrap items-start justify-between gap-3;
+  }
+
+  .muted {
+    @apply text-[13px] text-un1ca-muted;
+  }
+
+  .mono {
+    @apply font-mono;
+    word-break: break-all;
+    overflow-wrap: anywhere;
+  }
+
+  .mono-chip {
+    @apply inline-block max-w-full rounded-md bg-white/10 px-1.5 py-0.5 font-mono text-[12px];
+    word-break: break-all;
+  }
+
+  .state-error {
+    @apply text-[13px] text-un1ca-danger;
+  }
+
+  /* Key/value rows used by the commit, firmware and workspace panes */
+  .keyvals {
+    @apply flex flex-col;
+  }
+
+  .keyval {
+    @apply flex items-start justify-between gap-4 border-t border-un1ca-divider py-3 text-[14px];
+  }
+
+  .keyval:first-child {
+    @apply border-t-0 pt-0;
+  }
+
+  .keyval-label {
+    @apply shrink-0 text-un1ca-muted;
+  }
+
+  .keyval-value {
+    @apply min-w-0 text-right font-bold text-un1ca-text;
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
+  /* =====================================================================
+     INPUTS - underline only, label turns blue on focus
+     ===================================================================== */
+
+  .input-field {
+    @apply flex min-w-0 flex-col;
+  }
+
+  .field-label {
+    @apply mb-1 block text-[13px] font-normal text-un1ca-kicker;
+    transition: color 150ms ease;
+  }
+
+  .input-field:focus-within > .field-label {
+    color: theme('colors.un1ca.accent');
+  }
+
+  .text-input,
+  .area-input {
+    @apply block w-full border-0 border-b bg-transparent px-0 py-2 text-[15px] leading-[1.4] text-un1ca-text outline-none transition-colors;
+    border-bottom: 1px solid theme('colors.un1ca.inputLine');
+    border-radius: 0;
+    font: inherit;
+    font-size: 15px;
+  }
+
+  .area-input {
+    @apply min-h-[92px] resize-y py-2 font-mono text-[13px];
+  }
+
+  .text-input::placeholder,
+  .area-input::placeholder {
+    color: rgba(252, 252, 252, 0.32);
+  }
+
+  .text-input:hover,
+  .area-input:hover {
+    border-bottom-color: rgba(255, 255, 255, 0.5);
+  }
+
+  .text-input:focus,
+  .area-input:focus {
+    border-bottom-color: theme('colors.un1ca.accent');
+  }
+
+  .text-input:disabled,
+  .area-input:disabled {
+    opacity: 0.5;
+  }
+
+  /* =====================================================================
+     BUTTONS
+     ===================================================================== */
+
+  .action-button {
+    @apply inline-flex items-center justify-center gap-2 rounded-full border-none px-5 font-samsung text-[15px] font-bold leading-none transition-colors duration-150 ease-in-out;
+    min-height: 44px;
+  }
+
+  .action-button:disabled {
+    @apply cursor-default;
+    opacity: 0.45;
+  }
+
+  .action-button.is-small {
+    @apply px-4 text-[13px];
+    min-height: 34px;
+  }
+
+  .action-button.is-block {
+    @apply w-full;
+  }
+
+  .button-primary {
+    @apply action-button text-white;
+    background: theme('colors.un1ca.accent');
+  }
+
+  .button-primary:hover:not(:disabled) {
+    background: theme('colors.un1ca.accentHover');
+  }
+
+  .button-secondary,
+  .button-ghost {
+    @apply action-button text-un1ca-text;
+    background: rgba(255, 255, 255, 0.08);
+  }
+
+  .button-secondary:hover:not(:disabled),
+  .button-ghost:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.14);
+  }
+
+  .button-ghost {
+    text-decoration: none;
+  }
+
+  .button-danger {
+    @apply action-button text-white;
+    background: #c84055;
+  }
+
+  .button-danger:hover:not(:disabled) {
+    background: #d44a60;
+  }
+
+  .button-text {
+    @apply inline-flex items-center justify-center gap-2 rounded-full px-3 py-2 text-[14px] font-bold transition-colors;
+    color: theme('colors.un1ca.accent');
+    background: transparent;
+  }
+
+  .button-text:hover:not(:disabled) {
+    background: rgba(18, 89, 209, 0.14);
+  }
+
+  .button-text:disabled {
+    opacity: 0.45;
+  }
+
+  .icon-button {
+    @apply inline-flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full border border-un1ca-border bg-white/[0.04] text-un1ca-text transition-colors;
+  }
+
+  .icon-button:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .icon-button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .icon-button.is-danger:hover:not(:disabled) {
+    background: rgba(255, 122, 140, 0.18);
+    color: theme('colors.un1ca.danger');
+  }
+
+  .actions-row {
+    @apply flex flex-wrap gap-2;
+  }
+
+  /* =====================================================================
+     PILLS / CHIPS / BADGES
+     ===================================================================== */
+
+  .pill {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-[11px] font-bold uppercase tracking-[0.08em];
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(252, 252, 252, 0.7);
+  }
+
+  .pill.is-success {
+    background: rgba(35, 168, 110, 0.18);
+    color: theme('colors.un1ca.success');
+  }
+
+  .pill.is-danger {
+    background: rgba(255, 122, 140, 0.16);
+    color: theme('colors.un1ca.danger');
+  }
+
+  .pill.is-warning {
+    background: rgba(242, 193, 78, 0.16);
+    color: theme('colors.un1ca.warning');
+  }
+
+  .pill.is-info {
+    background: theme('colors.un1ca.badgeBg');
+    color: theme('colors.un1ca.badgeText');
+  }
+
+  .pill-dot {
+    @apply h-1.5 w-1.5 rounded-full;
+    background: currentColor;
+  }
+
+  .chip-button {
+    @apply inline-flex items-center gap-2 rounded-full border border-un1ca-border bg-white/[0.04] px-3 py-1.5 text-[13px] text-un1ca-muted transition-colors;
+  }
+
+  .chip-button:hover {
+    @apply text-un1ca-text;
+    background: rgba(255, 255, 255, 0.09);
+  }
+
+  .chip-button.is-active {
+    @apply text-un1ca-text;
+    background: rgba(18, 89, 209, 0.2);
+    border-color: rgba(18, 89, 209, 0.45);
+  }
+
+  /* The separator owns its spacing, so the markup carries no stray whitespace */
+  .license-sep {
+    @apply mx-2 inline-block text-un1ca-kicker;
+  }
+
+  .chip-static {
+    @apply inline-flex items-center rounded-full border border-un1ca-border bg-un1ca-chip px-2.5 py-1 text-[12px] text-un1ca-text;
+  }
+
+  /* =====================================================================
+     LIST ROWS - jobs, mods, debloat, firmware, workspaces
+     ===================================================================== */
+
+  .list {
+    @apply flex list-none flex-col gap-2 p-0;
+  }
+
+  .list-row {
+    @apply w-full rounded-[18px] border border-un1ca-border bg-un1ca-surface px-4 py-3 text-left transition-colors;
+  }
+
+  .list-row.is-clickable {
+    @apply cursor-pointer;
+  }
+
+  .list-row.is-clickable:hover {
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .list-row.is-selected {
+    border-color: rgba(18, 89, 209, 0.55);
+    background: rgba(18, 89, 209, 0.14);
+  }
+
+  .list-row.is-off {
+    border-color: rgba(255, 122, 140, 0.35);
+    background: rgba(255, 122, 140, 0.07);
+  }
+
+  .list-row-title {
+    @apply text-[15px] font-bold text-un1ca-text;
+    overflow-wrap: anywhere;
+  }
+
+  .list-row-meta {
+    @apply mt-0.5 text-[12px] text-un1ca-muted;
+    overflow-wrap: anywhere;
+  }
+
+  .empty-state {
+    @apply rounded-[18px] border border-dashed border-un1ca-divider px-4 py-8 text-center text-[13px] text-un1ca-muted;
+  }
+
+  /* Section inside a settings card */
+  .form-section {
+    @apply rounded-[20px] border border-un1ca-border bg-un1ca-surface p-4;
+  }
+
+  .form-section-title {
+    @apply mb-3 font-sharp text-[16px] font-bold tracking-[-0.005em] text-un1ca-text;
+  }
+
+  /* One UI keeps 25px between a setting's text block and its control */
+  .form-row {
+    @apply flex items-center justify-between py-2;
+    gap: 25px;
+  }
+
+  .form-row > :last-child {
+    @apply shrink-0;
+  }
+
+  .form-row-stack {
+    @apply flex-col items-stretch;
+    gap: 8px;
+  }
+
+  .form-label {
+    @apply text-[14px] text-un1ca-mutedStrong;
+  }
+
+  .form-hint {
+    @apply text-[12px] leading-snug text-un1ca-muted;
+  }
+
+  /* =====================================================================
+     PROGRESS
+     ===================================================================== */
+
+  .progress-row {
+    @apply mb-1.5 flex items-center justify-between gap-3 text-[12px] text-un1ca-mutedStrong;
+  }
+
+  .progress-track {
+    @apply relative h-[6px] w-full overflow-hidden rounded-full;
+    background: rgba(255, 255, 255, 0.1);
+  }
+
+  .progress-fill {
+    @apply h-full rounded-full;
+    background: theme('colors.un1ca.accent');
+    transition: width 240ms ease-out;
+  }
+
+  .progress-fill.is-success {
+    background: theme('colors.un1ca.success');
+  }
+
+  .progress-fill.is-danger {
+    background: theme('colors.un1ca.danger');
+  }
+
+  /* Unknown-duration work: a sliding band instead of a lying percentage */
+  .progress-track.is-indeterminate .progress-fill {
+    width: 38% !important;
+    animation: progress-slide 1.25s ease-in-out infinite;
+  }
+
+  .progress-meta {
+    @apply mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-un1ca-muted;
+  }
+
+  /* =====================================================================
+     ONE UI CONTROLS
+     ===================================================================== */
+
+  .oneui-checkbox {
+    @apply inline-flex cursor-pointer select-none items-center gap-2;
+  }
+
+  .oneui-checkbox.is-disabled {
+    @apply cursor-default opacity-50;
+  }
+
+  .oneui-input-hidden {
+    @apply absolute h-px w-px opacity-0;
+    clip: rect(0, 0, 0, 0);
+  }
+
+  .oneui-checkbox-box {
+    @apply inline-flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-transparent transition-colors;
+    border: 1.5px solid rgba(252, 252, 252, 0.45);
+  }
+
+  .oneui-checkbox:hover .oneui-checkbox-box {
+    border-color: rgba(252, 252, 252, 0.75);
+  }
+
+  .oneui-input-hidden:focus-visible + .oneui-checkbox-box {
+    box-shadow: 0 0 0 3px rgba(18, 89, 209, 0.45);
+  }
+
+  .oneui-input-hidden:checked + .oneui-checkbox-box {
+    border-color: transparent;
+    background: theme('colors.un1ca.accent');
+  }
+
+  .oneui-checkbox-label {
+    @apply text-[14px] text-un1ca-mutedStrong;
+  }
+
+  .oneui-switch {
+    @apply inline-flex h-6 cursor-pointer items-center;
+  }
+
+  .oneui-switch.is-disabled {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .oneui-switch-track {
+    @apply relative inline-flex h-[22px] w-[40px] flex-shrink-0 items-center rounded-full transition-colors;
+    background: rgba(255, 255, 255, 0.18);
+  }
+
+  .oneui-input-hidden:focus-visible + .oneui-switch-track {
+    box-shadow: 0 0 0 3px rgba(18, 89, 209, 0.45);
+  }
+
+  .oneui-input-hidden:checked + .oneui-switch-track {
+    background: theme('colors.un1ca.accent');
+  }
+
+  .oneui-switch-thumb {
+    @apply absolute left-[2px] top-[2px] h-[18px] w-[18px] rounded-full bg-white shadow transition-transform;
+  }
+
+  .oneui-input-hidden:checked + .oneui-switch-track .oneui-switch-thumb {
+    transform: translateX(18px);
+  }
+
+  .oneui-select-wrapper {
+    @apply relative inline-flex min-w-0 items-center;
+  }
+
+  .oneui-select {
+    @apply w-full rounded-full border border-un1ca-border bg-un1ca-surface py-2 pl-4 pr-9 text-[14px] text-un1ca-text outline-none transition-colors;
+    appearance: none;
+    -webkit-appearance: none;
+  }
+
+  .oneui-select:focus-visible {
+    border-color: theme('colors.un1ca.accent');
+  }
+
+  .oneui-select:disabled {
+    opacity: 0.5;
+  }
+
+  .oneui-select-chevron {
+    @apply pointer-events-none absolute right-3 h-4 w-4 text-un1ca-muted;
+  }
+
+  /* =====================================================================
+     MODAL / DIALOG
+     ===================================================================== */
+
+  .modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-center justify-center px-4;
+    background: rgba(0, 0, 0, 0.7);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+  }
+
+  .modal-card {
+    @apply surface-card w-[min(520px,calc(100vw-24px))] max-h-[86vh] overflow-y-auto;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+  }
+
+  .modal-title {
+    @apply font-sharp text-[19px] font-bold tracking-[-0.005em];
+  }
+
+  /* =====================================================================
+     LOG PANE
+     ===================================================================== */
+
+  .log-pane {
+    @apply min-h-0 flex-1 overflow-auto rounded-[18px] border border-un1ca-border bg-black p-3 font-mono text-[12px] leading-5;
+    color: rgba(252, 252, 252, 0.82);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  /* =====================================================================
+     TOASTS - glass plate with a living brand halo, swipe sideways to dismiss
+     ===================================================================== */
+
+  .toast-stack {
+    @apply pointer-events-none fixed left-1/2 z-[10000] flex flex-col items-center;
+    transform: translateX(-50%);
+    top: calc(env(safe-area-inset-top) + 0.75rem);
+    /* The halo bleeds well past the plate, so neighbours need room or the two
+       glows merge into one smear */
+    gap: 1.35rem;
+  }
+
+  .toast {
+    @apply pointer-events-auto flex select-none items-center gap-2 text-[14px] leading-[1.35];
+    /* The halo is tinted by what happened, brand blue being the neutral case */
+    --toast-glow-a: rgba(18, 89, 209, 0.55);
+    --toast-glow-b: rgba(93, 180, 255, 0.45);
+    --toast-glow-c: rgba(55, 129, 246, 0.3);
+    --toast-glow-ring: rgba(18, 89, 209, 0.3);
+    touch-action: pan-y;
+    width: calc(100vw - 1rem);
+    padding: 0.7rem 1.1rem;
+    border-radius: 0.85rem;
+    color: theme('colors.un1ca.text');
+    background: rgba(13, 13, 16, 0.72);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    box-shadow:
+      0 12px 34px rgba(0, 0, 0, 0.5),
+      inset 0 0 0 1px rgba(255, 255, 255, 0.09);
+    animation: toast-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+
+  @media (min-width: 641px) {
+    .toast {
+      width: auto;
+      min-width: 20rem;
+      max-width: min(28rem, calc(100vw - 1.5rem));
+    }
+  }
+
+  .toast-text {
+    @apply min-w-0 flex-1;
+    overflow-wrap: anywhere;
+  }
+
+  .toast.is-rich {
+    @apply items-start;
+  }
+
+  .toast-body {
+    @apply flex min-w-0 flex-1 flex-col;
+  }
+
+  .toast-title {
+    @apply font-bold;
+  }
+
+  .toast-title + .toast-text {
+    @apply mt-0.5 text-[13px] opacity-80;
+  }
+
+  .toast-actions {
+    @apply mt-3 flex flex-wrap justify-end gap-2;
+  }
+
+  .toast-action {
+    @apply inline-flex items-center rounded-full border border-white/15 px-3 py-1.5 text-[13px] font-bold transition-colors;
+    color: theme('colors.un1ca.text');
+    background: rgba(255, 255, 255, 0.06);
+  }
+
+  .toast-action:hover {
+    background: rgba(255, 255, 255, 0.12);
+  }
+
+  .toast-action.is-primary {
+    border-color: transparent;
+    background: theme('colors.un1ca.accent');
+    color: #fff;
+  }
+
+  .toast-action.is-primary:hover {
+    background: theme('colors.un1ca.accentHover');
+  }
+
+  .toast-dot {
+    @apply h-2 w-2 flex-none rounded-full;
+    background: #5db4ff;
+  }
+
+  .toast.is-success {
+    --toast-glow-a: rgba(35, 168, 110, 0.55);
+    --toast-glow-b: rgba(111, 227, 164, 0.45);
+    --toast-glow-c: rgba(35, 168, 110, 0.3);
+    --toast-glow-ring: rgba(35, 168, 110, 0.3);
+  }
+
+  .toast.is-warning {
+    --toast-glow-a: rgba(242, 193, 78, 0.5);
+    --toast-glow-b: rgba(255, 214, 128, 0.42);
+    --toast-glow-c: rgba(242, 193, 78, 0.28);
+    --toast-glow-ring: rgba(242, 193, 78, 0.28);
+  }
+
+  .toast.is-error {
+    --toast-glow-a: rgba(214, 45, 70, 0.55);
+    --toast-glow-b: rgba(255, 122, 140, 0.45);
+    --toast-glow-c: rgba(214, 45, 70, 0.3);
+    --toast-glow-ring: rgba(214, 45, 70, 0.32);
+  }
+
+  .toast.is-success .toast-dot {
+    background: theme('colors.un1ca.success');
+  }
+  .toast.is-error .toast-dot {
+    background: theme('colors.un1ca.danger');
+  }
+  .toast.is-warning .toast-dot {
+    background: theme('colors.un1ca.warning');
+  }
+
+  /* The halo is drawn as blurred radial blobs rather than a box-shadow: a shadow
+     traces the silhouette and reads as a second plate behind the first */
+  .toast-glow {
+    position: relative;
+  }
+
+  .toast-glow::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    box-shadow: 0 0 40px 6px var(--toast-glow-ring);
+  }
+
+  /* Kept under the plate with z-index -1, otherwise the light washes over the
+     text and blurs it */
+  .toast-glow::after {
+    content: '';
+    position: absolute;
+    inset: -34px;
+    z-index: -1;
+    pointer-events: none;
+    filter: blur(26px);
+    background:
+      radial-gradient(45% 60% at 28% 45%, var(--toast-glow-a), transparent 70%),
+      radial-gradient(40% 55% at 74% 58%, var(--toast-glow-b), transparent 72%),
+      radial-gradient(55% 40% at 50% 85%, var(--toast-glow-c), transparent 75%);
+    animation: toast-flame 7.3s ease-in-out infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .toast-glow::after {
+      animation: none;
+      opacity: 0.8;
+    }
+  }
+
+  /* =====================================================================
+     LOADER - Samsung four-dot spinner
+     ===================================================================== */
+
+  /* Four dots that scatter outwards while the whole group rotates. The dot size
+     and the scatter reach are fixed pixel values, not percentages: the small
+     variant has its own keyframes because scaling the reach with the dot would
+     flatten the motion into a wobble */
+  /* The dots scatter well past the loader box, so a fixed footprint keeps them
+     from crowding whatever sits next to it */
+  .samsung-loader-box {
+    @apply inline-flex flex-none items-center justify-center;
+    width: 40px;
+    height: 40px;
+  }
+
+  .samsung-loader-box.is-small {
+    width: 22px;
+    height: 22px;
+  }
+
+  .samsung-loader {
+    position: relative;
+    width: 11.25px;
+    height: 11.25px;
+    flex-shrink: 0;
+    animation: samsung-loader-rotate 1s linear infinite;
+  }
+
+  .samsung-loader-dot {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 11.25px;
+    height: 11.25px;
+    border-radius: 999px;
+    will-change: transform;
+    backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
+  }
+
+  .samsung-loader-dot-top {
+    background: #3781f6;
+    animation: samsung-loader-big-tl 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  }
+  .samsung-loader-dot-right {
+    background: #61d299;
+    animation: samsung-loader-big-tr 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  }
+  .samsung-loader-dot-bottom {
+    background: #3781f6;
+    animation: samsung-loader-big-br 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  }
+  .samsung-loader-dot-left {
+    background: #3781f6;
+    animation: samsung-loader-big-bl 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
+  }
+
+  /* Inline variant for buttons and headings */
+  .samsung-loader.is-small {
+    width: 6px;
+    height: 6px;
+    animation-duration: 1.4s;
+  }
+
+  .samsung-loader.is-small .samsung-loader-dot {
+    width: 6px;
+    height: 6px;
+  }
+
+  .samsung-loader.is-small .samsung-loader-dot-top {
+    animation-name: samsung-loader-scatter-tl;
+  }
+  .samsung-loader.is-small .samsung-loader-dot-right {
+    animation-name: samsung-loader-scatter-tr;
+  }
+  .samsung-loader.is-small .samsung-loader-dot-bottom {
+    animation-name: samsung-loader-scatter-br;
+  }
+  .samsung-loader.is-small .samsung-loader-dot-left {
+    animation-name: samsung-loader-scatter-bl;
+  }
+
+  .samsung-loader.is-mono .samsung-loader-dot {
+    background: currentColor;
+  }
+
+  .loading-block {
+    @apply flex items-center justify-center gap-3 rounded-[20px] bg-white/[0.02] py-10 text-[14px] text-un1ca-muted;
+  }
+}
+
+/* =========================================================================
+   TRANSITIONS
+   ========================================================================= */
+
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 180ms ease;
+}
+
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
 }
 
 .modal-fade-enter-active,
@@ -21,25 +988,216 @@ body {
   transition: opacity 180ms ease;
 }
 
-.modal-fade-enter-active > div,
-.modal-fade-leave-active > div {
-  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1), opacity 220ms ease;
+.modal-fade-enter-active .modal-card,
+.modal-fade-leave-active .modal-card {
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease;
 }
 
-.modal-fade-enter-from {
-  opacity: 0;
-}
-
-.modal-fade-enter-from > div {
-  transform: translateY(10px) scale(0.98);
-  opacity: 0;
-}
-
+.modal-fade-enter-from,
 .modal-fade-leave-to {
   opacity: 0;
 }
 
-.modal-fade-leave-to > div {
-  transform: translateY(8px) scale(0.99);
+.modal-fade-enter-from .modal-card,
+.modal-fade-leave-to .modal-card {
+  transform: translateY(10px) scale(0.98);
   opacity: 0;
+}
+
+.overlay-slide-enter-active,
+.overlay-slide-leave-active {
+  transition:
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease;
+}
+
+.overlay-slide-enter-from,
+.overlay-slide-leave-to {
+  transform: translateX(4%);
+  opacity: 0;
+}
+
+.toast-list-enter-active {
+  animation: toast-in 0.28s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.toast-list-leave-active {
+  animation:
+    toast-out 0.28s ease forwards,
+    toast-collapse 0.2s ease 0.2s forwards;
+}
+
+.toast-list-move {
+  transition: transform 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* =========================================================================
+   KEYFRAMES
+   ========================================================================= */
+
+@keyframes progress-slide {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(263%);
+  }
+}
+
+@keyframes samsung-loader-rotate {
+  0% {
+    transform: rotate(0deg);
+  }
+  100% {
+    transform: rotate(360deg);
+  }
+}
+
+/* 11.25px dots, ~15px reach */
+@keyframes samsung-loader-big-tl {
+  0%,
+  100% {
+    transform: translate(-7px, -7px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(-15px, -15px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-big-tr {
+  0%,
+  100% {
+    transform: translate(7px, -7px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(15px, -15px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-big-br {
+  0%,
+  100% {
+    transform: translate(7px, 7px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(15px, 15px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-big-bl {
+  0%,
+  100% {
+    transform: translate(-7px, 7px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(-15px, 15px);
+    opacity: 1;
+  }
+}
+
+/* 6px dots, ~8px reach */
+@keyframes samsung-loader-scatter-tl {
+  0%,
+  100% {
+    transform: translate(-3.5px, -3.5px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(-8px, -8px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-scatter-tr {
+  0%,
+  100% {
+    transform: translate(3.5px, -3.5px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(8px, -8px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-scatter-br {
+  0%,
+  100% {
+    transform: translate(3.5px, 3.5px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(8px, 8px);
+    opacity: 1;
+  }
+}
+@keyframes samsung-loader-scatter-bl {
+  0%,
+  100% {
+    transform: translate(-3.5px, 3.5px);
+    opacity: 0.9;
+  }
+  50% {
+    transform: translate(-8px, 8px);
+    opacity: 1;
+  }
+}
+
+@keyframes toast-in {
+  from {
+    transform: translateY(-140%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+@keyframes toast-out {
+  from {
+    transform: translateY(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateY(-140%);
+    opacity: 0;
+  }
+}
+
+/* Collapsing the height lets the neighbours slide up instead of jumping */
+@keyframes toast-collapse {
+  to {
+    max-height: 0;
+    margin-top: 0;
+    opacity: 0;
+  }
+}
+
+/* Uneven keyframes over a 7.3s period stop the drift from reading as a blink */
+@keyframes toast-flame {
+  0% {
+    transform: scale(1) translate3d(0, 0, 0);
+    opacity: 0.72;
+  }
+  23% {
+    transform: scale(1.04) translate3d(4px, -2px, 0);
+    opacity: 0.95;
+  }
+  47% {
+    transform: scale(0.99) translate3d(-4px, 2px, 0);
+    opacity: 0.78;
+  }
+  68% {
+    transform: scale(1.03) translate3d(2px, 3px, 0);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1) translate3d(0, 0, 0);
+    opacity: 0.72;
+  }
 }

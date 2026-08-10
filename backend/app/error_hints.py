@@ -1,6 +1,5 @@
 import re
 
-
 _HINTS = [
     (
         "loop-device",
@@ -42,7 +41,7 @@ _HINTS = [
         re.compile(r"DownloadBinaryInform returned 400", re.IGNORECASE),
         "Firmware version not found",
         "Samsung firmware server rejected requested version",
-        "Double‑check model/CSC/firmware version or remove override",
+        "Double-check model/CSC/firmware version or remove override",
     ),
 ]
 

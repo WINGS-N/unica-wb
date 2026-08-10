@@ -1,0 +1,140 @@
+version: "3"
+
+vars:
+  VERSION: '{{.VERSION | default "0.0.0"}}'
+  ARCH:
+    sh: go env GOARCH
+  APPIMAGE_ARCH:
+    sh: 'case "$(go env GOARCH)" in amd64) echo x86_64 ;; arm64) echo aarch64 ;; *) go env GOARCH ;; esac'
+  BIN: bin/unica-wb
+  WEBUI: internal/webui/dist
+  NAME: 'unica-wb_{{.VERSION}}_linux_{{.ARCH}}'
+
+tasks:
+  default:
+    cmds: [task: build]
+
+  tidy:
+    cmds:
+      - go mod tidy
+
+  webui:
+    desc: Build the interface and stage it for embedding
+    dir: ../frontend
+    env:
+      APP_VERSION: "{{.VERSION}}"
+    cmds:
+      - corepack enable || true
+      - pnpm install --frozen-lockfile
+      - pnpm run build
+      - rm -rf ../desktop/{{.WEBUI}}
+      - mkdir -p ../desktop/{{.WEBUI}}
+      - cp -r dist/. ../desktop/{{.WEBUI}}/
+      - touch ../desktop/{{.WEBUI}}/.gitkeep
+
+  webui:clean:
+    cmds:
+      - find {{.WEBUI}} -mindepth 1 ! -name .gitkeep -delete
+
+  build:
+    desc: Build the launcher binary with whatever interface is staged
+    cmds:
+      - mkdir -p bin
+      - go build -trimpath -ldflags "-s -w -X main.version={{.VERSION}}" -o {{.BIN}} .
+
+  build:full:
+    desc: Build the interface and then the binary that carries it
+    cmds:
+      - task: webui
+      - task: build
+
+  run:
+    desc: Run the launcher from source
+    cmds:
+      - go run .
+
+  test:
+    cmds:
+      - go test ./...
+
+  vet:
+    cmds:
+      - go vet ./...
+
+  fmt:check:
+    cmds:
+      - test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+
+  package:binary:
+    desc: Ship the bare binary
+    deps: [build]
+    cmds:
+      - mkdir -p dist
+      - cp {{.BIN}} dist/{{.NAME}}
+
+  package:deb:
+    desc: Build a .deb with the compose files and seed images
+    deps: [build]
+    dir: build/linux
+    env:
+      VERSION: "{{.VERSION}}"
+      ARCH: "{{.ARCH}}"
+    cmds:
+      - mkdir -p ../../dist
+      - nfpm package -p deb -f nfpm.yaml -t ../../dist/{{.NAME}}.deb
+
+  package:archive:
+    desc: Build a portable tarball
+    deps: [build]
+    cmds:
+      - rm -rf dist/unica-wb
+      - mkdir -p dist/unica-wb
+      - cp {{.BIN}} dist/unica-wb/
+      - cp ../docker-compose.yml ../docker-compose.local-repo.yml dist/unica-wb/
+      - cp -r seed-images dist/unica-wb/
+      - tar -C dist -czf dist/{{.NAME}}.tar.gz unica-wb
+      - rm -rf dist/unica-wb
+
+  package:appimage:
+    desc: Build an AppImage
+    deps: [build]
+    env:
+      ARCH: "{{.APPIMAGE_ARCH}}"
+      VERSION: "{{.VERSION}}"
+    cmds:
+      - rm -rf build/appdir
+      - mkdir -p build/appdir/usr/bin build/appdir/usr/share/unica-wb
+      - mkdir -p build/appdir/usr/share/applications
+      - mkdir -p build/appdir/usr/share/icons/hicolor/512x512/apps
+      - cp {{.BIN}} build/appdir/usr/bin/unica-wb
+      - cp ../docker-compose.yml ../docker-compose.local-repo.yml build/appdir/usr/share/unica-wb/
+      - cp -r seed-images build/appdir/usr/share/unica-wb/
+      - cp build/linux/unica-wb.desktop build/appdir/usr/share/applications/unica-wb.desktop
+      - cp build/linux/unica-wb.png build/appdir/usr/share/icons/hicolor/512x512/apps/unica-wb.png
+      - cp build/linux/unica-wb.desktop build/appdir/unica-wb.desktop
+      - cp build/linux/unica-wb.png build/appdir/unica-wb.png
+      - cp build/linux/AppRun build/appdir/AppRun
+      - chmod +x build/appdir/AppRun
+      - mkdir -p dist
+      - ARCH={{.APPIMAGE_ARCH}} appimagetool --no-appstream build/appdir dist/{{.NAME}}.AppImage
+
+  package:
+    desc: Build every Linux artifact
+    cmds:
+      - task: package:deb
+      - task: package:archive
+      - task: package:appimage
+      - task: package:binary
+      - task: checksums
+
+  checksums:
+    desc: Write a SHA-512/256 checksum file next to the artifacts
+    dir: dist
+    cmds:
+      # Named per arch so artifacts from several runners can be merged later
+      - rm -f checksums_linux_{{.ARCH}}.txt
+      - find . -maxdepth 1 -type f ! -name 'checksums_*.txt' -printf '%P\n' | sort | xargs openssl dgst -r -sha512-256 > checksums_linux_{{.ARCH}}.txt
+
+  clean:
+    cmds:
+      - rm -rf bin dist build/appdir

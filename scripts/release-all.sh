@@ -1,27 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Полный release pipeline: build images -> export seed -> build electron -> publish images
-# Full release pipeline: build images -> export seed -> build electron -> publish images
+# Full release pipeline: build images -> export seed -> build the desktop
+# launcher -> publish images
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-ELECTRON_DIR="${ROOT_DIR}/electron"
+DESKTOP_DIR="${ROOT_DIR}/desktop"
 
-ELECTRON_TARGET="${1:-linux}"
+VERSION="${VERSION:-0.0.0}"
 PUBLISH_MODE="${PUBLISH_MODE:-yes}"
 
-case "${ELECTRON_TARGET}" in
-  linux|win|windows|all)
-    ;;
-  *)
-    echo "Unknown electron target: ${ELECTRON_TARGET}"
-    echo "Use one of: linux | win | all"
-    exit 1
-    ;;
-esac
-
 if [ -f "${ROOT_DIR}/.env" ]; then
-  # Подхватываем IMAGE_* и GHCR_OWNER из .env
   # Load IMAGE_* and GHCR_OWNER from .env
   set -a
   # shellcheck disable=SC1091
@@ -37,18 +26,18 @@ echo "[1/4] Build docker images via compose"
 
 echo "[2/4] Export seed images"
 (
-  cd "${ELECTRON_DIR}"
+  cd "${ROOT_DIR}"
   ./scripts/export-seed-images.sh
 )
 
-echo "[3/4] Build electron packages via docker (${ELECTRON_TARGET})"
+echo "[3/4] Build the desktop launcher (${VERSION})"
 (
-  cd "${ELECTRON_DIR}"
-  ./scripts/build-docker.sh "${ELECTRON_TARGET}"
+  cd "${DESKTOP_DIR}"
+  VERSION="${VERSION}" task package
 )
 
 if [ "${PUBLISH_MODE}" = "yes" ]; then
-  echo "[4/4] Publish docker images"
+  echo "[4/4] Publish images"
   (
     cd "${ROOT_DIR}"
     ./scripts/publish-images.sh
@@ -57,5 +46,6 @@ else
   echo "[4/4] Publish skipped (PUBLISH_MODE=${PUBLISH_MODE})"
 fi
 
-echo "Release pipeline done"
-echo "Electron artifacts: ${ELECTRON_DIR}/out"
+echo
+echo "Release done"
+echo "Desktop artifacts: ${DESKTOP_DIR}/dist"

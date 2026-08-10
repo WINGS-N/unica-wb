@@ -21,12 +21,17 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
+  PNPM_VERSION: 10.6.2
+  NODE_VERSION: 22
+  GO_VERSION: "1.25"
+  NFPM_VERSION: v2.43.1
 
 jobs:
   prep:
     runs-on: ubuntu-22.04
     outputs:
       owner_lc: ${{ steps.vars.outputs.owner_lc }}
+      tag: ${{ steps.vars.outputs.tag }}
       version: ${{ steps.vars.outputs.version }}
     steps:
       - name: Set release vars
@@ -40,17 +45,67 @@ jobs:
             echo "Expected strict semver tag format: vX.Y.Z"
             exit 1
           fi
-          echo "version=$TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
           echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
+  # Built once so every package embeds byte-identical assets
+  frontend:
+    runs-on: ubuntu-22.04
+    needs: prep
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prep.outputs.tag }}
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Build the interface
+        working-directory: frontend
+        env:
+          APP_VERSION: ${{ needs.prep.outputs.version }}
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webui
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 1
 
   build-docker-images:
     runs-on: ubuntu-22.04
     needs: prep
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: unica-wb-api
+            context: .
+            file: backend/Dockerfile
+            target: api
+          - image: unica-wb-worker
+            context: .
+            file: backend/Dockerfile
+            target: worker
+          - image: unica-wb-frontend
+            context: frontend
+            file: frontend/Dockerfile
+            target: ""
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prep.outputs.version }}
+          ref: ${{ needs.prep.outputs.tag }}
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -59,126 +114,133 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GHCR_TOKEN != '' && secrets.GHCR_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Build and push API image
+      - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
         with:
-          context: .
-          file: backend/Dockerfile
-          target: api
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          target: ${{ matrix.target }}
+          # The build stack itself is x86 tooling, so the images stay amd64
+          platforms: linux/amd64
           push: true
+          build-args: |
+            APP_VERSION=${{ needs.prep.outputs.version }}
           tags: |
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:${{ needs.prep.outputs.version }}
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-api:latest
-          cache-from: type=gha,scope=unica-wb-api
-          cache-to: type=gha,scope=unica-wb-api,mode=max
+            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/${{ matrix.image }}:${{ needs.prep.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
-      - name: Build and push worker image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          target: worker
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:${{ needs.prep.outputs.version }}
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-worker:latest
-          cache-from: type=gha,scope=unica-wb-worker
-          cache-to: type=gha,scope=unica-wb-worker,mode=max
-
-      - name: Build and push frontend image
-        uses: docker/build-push-action@v6
-        with:
-          context: frontend
-          file: frontend/Dockerfile
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:${{ needs.prep.outputs.version }}
-            ${{ env.REGISTRY }}/${{ needs.prep.outputs.owner_lc }}/unica-wb-frontend:latest
-          cache-from: type=gha,scope=unica-wb-frontend
-          cache-to: type=gha,scope=unica-wb-frontend,mode=max
-
-  build-electron-linux:
-    runs-on: ubuntu-22.04
+  build-desktop:
     needs:
       - prep
-    defaults:
-      run:
-        working-directory: electron
+      - frontend
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: amd64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.runner }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.prep.outputs.version }}
+          ref: ${{ needs.prep.outputs.tag }}
 
-      - name: Set Electron version from tag
-        shell: bash
-        run: |
-          VERSION="${{ needs.prep.outputs.version }}"
-          VERSION="${VERSION#v}"
-          if [[ -z "$VERSION" ]]; then
-            echo "Resolved Electron version is empty"
-            exit 1
-          fi
-          node -e "const fs=require('fs');const p='package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.version='${VERSION}';fs.writeFileSync(p,JSON.stringify(j,null,2)+'\\n');"
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
+      - uses: actions/setup-go@v5
         with:
-          version: 9
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: desktop/go.sum
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      - name: Install Linux packaging deps
+      - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fakeroot rpm libarchive-tools
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config libgtk-4-dev libwebkitgtk-6.0-dev \
+            desktop-file-utils zsync file
 
-      - name: Install dependencies
-        run: pnpm install --no-frozen-lockfile
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@${{ env.NFPM_VERSION }}
 
-      - name: Build Linux artifacts
-        run: pnpm run ci:pack:linux
-
-      - name: Collect artifacts
+      - name: Install appimagetool
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
-          mkdir -p out
-          cp -a dist/. out/
+          case "$ARCH" in
+            amd64) asset=appimagetool-x86_64.AppImage ;;
+            arm64) asset=appimagetool-aarch64.AppImage ;;
+            *) echo "unsupported arch: $ARCH"; exit 1 ;;
+          esac
+          sudo curl -fsSL -o /usr/local/bin/appimagetool \
+            "https://github.com/AppImage/appimagetool/releases/download/continuous/$asset"
+          sudo chmod +x /usr/local/bin/appimagetool
 
-      - name: Upload Linux artifacts
-        uses: actions/upload-artifact@v4
+      - uses: arduino/setup-task@v2
         with:
-          name: electron-linux
-          path: electron/out
+          version: 3.x
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Take the prebuilt interface
+        uses: actions/download-artifact@v4
+        with:
+          name: webui
+          path: desktop/internal/webui/dist
+
+      - name: Verify the interface landed
+        working-directory: desktop
+        run: test -f internal/webui/dist/index.html
+
+      - name: Test
+        working-directory: desktop
+        env:
+          VERSION: ${{ needs.prep.outputs.version }}
+        run: task fmt:check vet test
+
+      - name: Build packages
+        working-directory: desktop
+        env:
+          VERSION: ${{ needs.prep.outputs.version }}
+          # AppImages cannot be mounted inside a container-less runner sandbox
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: task package
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop-linux-${{ matrix.arch }}
+          path: desktop/dist
           if-no-files-found: error
 
   github-release:
     runs-on: ubuntu-22.04
     needs:
       - prep
-      - build-electron-linux
+      - build-docker-images
+      - build-desktop
     steps:
-      - name: Download Linux artifacts
+      - name: Collect artifacts
         uses: actions/download-artifact@v4
         with:
-          name: electron-linux
-          path: release/linux
+          pattern: desktop-linux-*
+          path: release
+          merge-multiple: true
 
-      - name: Cleanup duplicate debug assets
+      - name: Merge the per-arch checksum files
         shell: bash
+        working-directory: release
         run: |
-          find release -type f \( -name 'builder-debug.yml' -o -name '*.blockmap' \) -delete
+          cat checksums_linux_*.txt | sort -k2 > checksums.txt
+          rm -f checksums_linux_*.txt
+          cat checksums.txt
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ needs.prep.outputs.version }}
-          name: UN1CA Web Builder ${{ needs.prep.outputs.version }}
+          tag_name: ${{ needs.prep.outputs.tag }}
+          name: UN1CA Web Builder ${{ needs.prep.outputs.tag }}
           generate_release_notes: true
           files: |
-            release/linux/*
+            release/*

@@ -1,33 +1,37 @@
+import errno
 import glob
+import hashlib
 import json
 import os
-import errno
 import re
-import signal
-import shutil
 import shlex
+import shutil
+import signal
 import subprocess
 import time
-import hashlib
-from urllib.parse import urlparse, quote
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
+from urllib.parse import quote, urlparse
 
+from . import workspaces as ws_lib
+from .build_progress import set_progress as set_build_progress
 from .config import settings
 from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
-from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
 from .ff_utils import apply_ff_overrides, restore_ff_overrides
 from .firmware_progress import set_progress
-from .build_progress import set_progress as set_build_progress, remove_progress as remove_build_progress
-from .repo_progress import clear_progress as clear_repo_progress, set_progress as set_repo_progress
+from .job_events import publish as publish_job_event
+from .models import BuildJob, Workspace
 from .mods_archive import validate_mods_archive
-from .models import BuildJob
+from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
+from .push import notify_job
 from .queue import redis_conn
+from .repo_progress import clear_progress as clear_repo_progress
+from .repo_progress import set_progress as set_repo_progress
 
 
 def _now():
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _safe_target(value: str) -> str:
@@ -35,7 +39,7 @@ def _safe_target(value: str) -> str:
 
 
 def _firmware_key_from_value(value: str | None) -> str:
-    # Из MODEL/CSC/... делаем ключ MODEL_CSC, единый id для прогресса и cache card.
+    # MODEL/CSC/... collapses into one MODEL_CSC key, the id shared by progress and cache cards
     parts = (value or "").split("/")
     if len(parts) < 2:
         return ""
@@ -46,18 +50,34 @@ def _firmware_key_from_value(value: str | None) -> str:
     return f"{model}_{csc}"
 
 
-def _ensure_fw_extracted(target_codename: str, source_firmware: str, target_firmware: str):
+def _workspace_context(db, job: BuildJob) -> ws_lib.WorkspaceRef:
+    ws = None
+    if job.workspace_id:
+        ws = db.get(Workspace, job.workspace_id)
+    if ws is None:
+        ws = ws_lib.default_workspace(db)
+    if ws is None:
+        raise RuntimeError("Job has no workspace")
+    ws_lib.ensure_layout(ws)
+    return ws_lib.snapshot(ws)
+
+
+def _ensure_fw_extracted(
+    ctx: ws_lib.WorkspaceRef,
+    target_codename: str,
+    source_firmware: str,
+    target_firmware: str,
+):
     source_key = _firmware_key_from_value(source_firmware)
     target_key = _firmware_key_from_value(target_firmware)
     if not source_key or not target_key:
         return
-    out_root = Path(settings.out_dir)
-    src_marker = out_root / "fw" / source_key / ".extracted"
-    tgt_marker = out_root / "fw" / target_key / ".extracted"
+    src_marker = ctx.out / "fw" / source_key / ".extracted"
+    tgt_marker = ctx.out / "fw" / target_key / ".extracted"
     if src_marker.exists() and tgt_marker.exists():
         return
     cmd = (
-        f"cd {shlex.quote(settings.un1ca_root)} && "
+        f"cd {shlex.quote(str(ctx.root))} && "
         f"source buildenv.sh {shlex.quote(target_codename)} && "
         f"export SOURCE_FIRMWARE={shlex.quote(source_firmware)} && "
         f"export TARGET_FIRMWARE={shlex.quote(target_firmware)} && "
@@ -69,7 +89,7 @@ def _ensure_fw_extracted(target_codename: str, source_firmware: str, target_firm
 
 
 def _to_bytes(number: float, unit: str) -> int:
-    # Нормализуем KiB/MiB/GiB и классические KB/MB в bytes.
+    # Normalize KiB/MiB/GiB and plain KB/MB into bytes
     normalized = (unit or "").strip().upper().replace("IB", "B")
     scale = {
         "B": 1,
@@ -83,29 +103,51 @@ def _to_bytes(number: float, unit: str) -> int:
 
 _RE_CACHE_KEY = re.compile(r"(SM-[A-Z0-9]+_[A-Z0-9]+)", re.IGNORECASE)
 _RE_MODEL_CSC = re.compile(r"(SM-[A-Z0-9]+)[/_]([A-Z0-9]{2,4})", re.IGNORECASE)
-_RE_PERCENT = re.compile(r"(?P<pct>\d{1,3})%")
+# A bare "NN%" appears in version strings and log prose, so a percent only counts
+# when it is part of a real progress readout: a tqdm bar, or a line that also
+# carries a done/total byte pair or a transfer speed
+_RE_TQDM_PERCENT = re.compile(r"(?<![\d.])(?P<pct>\d{1,3})\s*%\s*\|")
+_RE_LOOSE_PERCENT = re.compile(r"(?<![\d.])(?P<pct>\d{1,3})\s*%")
 _RE_BYTES = re.compile(
     r"(?P<done>\d+(?:\.\d+)?)\s*(?P<du>[KMGTP]?i?B)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<tu>[KMGTP]?i?B)",
     re.IGNORECASE,
 )
 _RE_SPEED = re.compile(r"(?P<spd>\d+(?:\.\d+)?)\s*(?P<su>[KMGTP]?i?B)/s", re.IGNORECASE)
 _RE_ELAPSED_ETA = re.compile(r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)<(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
-_RE_GIT_PERCENT = re.compile(r"(\d{1,3})%")
-_RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B/s)", re.IGNORECASE)
 _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
+
+# make_rom.sh announces every step with LOG_STEP_IN; those banners are the only
+# reliable progress signal a shell build gives us. Percentages are the share of
+# wall-clock a full build spends before that step, measured on a cold tree
 _BUILD_STAGE_RULES = [
-    ("prepare", 5, re.compile(r"(Preparing|Setup|Init)", re.IGNORECASE)),
-    ("tools", 15, re.compile(r"Building required tools", re.IGNORECASE)),
-    ("mods", 35, re.compile(r"Applying ROM mods", re.IGNORECASE)),
-    ("patches", 50, re.compile(r"Applying patches|patch", re.IGNORECASE)),
-    ("build", 70, re.compile(r"Building|Compiling|ninja:|soong", re.IGNORECASE)),
-    ("zip", 85, re.compile(r"zip|Packaging|flashable", re.IGNORECASE)),
-    ("done", 100, re.compile(r"Build complete|Finished|done", re.IGNORECASE)),
+    ("download", 6, re.compile(r"Downloading required firmwares")),
+    ("extract", 16, re.compile(r"Extracting required firmwares")),
+    ("workdir", 30, re.compile(r"Creating work dir")),
+    ("platform_patches", 38, re.compile(r"Applying platform patches")),
+    ("device_patches", 45, re.compile(r"Applying device patches")),
+    ("rom_patches", 54, re.compile(r"Applying ROM patches")),
+    ("rom_mods", 64, re.compile(r"Applying ROM mods")),
+    ("apks", 76, re.compile(r"Building APKs/JARs")),
+    ("target_files", 86, re.compile(r"Creating target-files zip")),
+    ("zip", 93, re.compile(r"Creating (?:flashable )?zip")),
+    ("done", 100, re.compile(r"Build completed")),
 ]
+
+# git clone reports several 0-100% phases in a row. Mapping each phase onto its
+# own slice of the bar is what stops it from jumping back to 0 four times
+_GIT_PHASES = [
+    ("counting", re.compile(r"Counting objects"), 0, 6),
+    ("compressing", re.compile(r"Compressing objects"), 6, 18),
+    ("receiving", re.compile(r"Receiving objects"), 18, 78),
+    ("resolving", re.compile(r"Resolving deltas"), 78, 92),
+    ("updating", re.compile(r"(?:Updating|Checking out) files"), 92, 100),
+]
+_RE_GIT_PHASE_PERCENT = re.compile(r"(?<![\d.])(\d{1,3})%")
+_RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/s", re.IGNORECASE)
 
 
 def _guess_fw_key(text: str, known_keys: list[str]) -> str:
-    # Пытаемся вытащить fw_key из текущей строки лога, чтобы progress привязать к правильной карточке.
+    # Pull the fw_key out of the current log line so progress lands on the right card
     if not text:
         return ""
     match = _RE_CACHE_KEY.search(text)
@@ -121,11 +163,14 @@ def _guess_fw_key(text: str, known_keys: list[str]) -> str:
 
 
 def _parse_progress(text: str) -> dict | None:
-    # Парсим tqdm-like output: percent, done/total bytes, speed, elapsed, eta.
+    # Parse tqdm-like output: percent, done/total bytes, speed, elapsed, eta
     if not text:
         return None
-    pct_match = _RE_PERCENT.search(text)
     bytes_match = _RE_BYTES.search(text)
+    speed_match = _RE_SPEED.search(text)
+    pct_match = _RE_TQDM_PERCENT.search(text)
+    if not pct_match and (bytes_match or speed_match):
+        pct_match = _RE_LOOSE_PERCENT.search(text)
     if not pct_match and not bytes_match:
         return None
     payload: dict[str, int] = {}
@@ -142,7 +187,6 @@ def _parse_progress(text: str) -> dict | None:
         payload["total_bytes"] = total_bytes
         if percent is None and total_bytes > 0:
             payload["percent"] = max(0, min(100, int((done_bytes / total_bytes) * 100)))
-    speed_match = _RE_SPEED.search(text)
     if speed_match:
         speed_val = float(speed_match.group("spd"))
         payload["speed_bps"] = _to_bytes(speed_val, speed_match.group("su"))
@@ -164,27 +208,13 @@ def _parse_hms(value: str) -> int:
     return 0
 
 
-def _repo_set_progress(payload: dict):
-    set_repo_progress({"scope": "repo", **payload})
-
-
-def _repo_root_dir() -> Path:
-    base = Path(settings.un1ca_root)
-    nested = base / "UN1CA"
-    if (base / ".git").is_dir() or (base / "target").is_dir():
-        return base
-    if (nested / ".git").is_dir() or (nested / "target").is_dir():
-        return nested
-    return base
-
-
 def _dir_cache_key_for_path(path: Path) -> str:
     digest = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
     return f"{_DIR_CACHE_KEY_PREFIX}{digest}"
 
 
 def _invalidate_dir_size_cache_paths(paths: list[Path]):
-    # Event-based invalidation for size cache so UI gets fresh values right after filesystem ops.
+    # Event-based invalidation for size cache so UI gets fresh values right after filesystem ops
     keys = []
     seen = set()
     for path in paths:
@@ -204,51 +234,79 @@ def _invalidate_dir_size_cache_paths(paths: list[Path]):
         pass
 
 
-def _repo_progress_from_line(line: str, started_at: float) -> dict:
-    pct = None
-    m_pct = _RE_GIT_PERCENT.search(line or "")
-    if m_pct:
-        try:
-            pct = max(0, min(100, int(m_pct.group(1))))
-        except Exception:
-            pct = None
+class _GitProgressTracker:
+    # Turns git's multi-phase 0-100% chatter into one bar that only moves forward
+    def __init__(self, workspace_id: str, stage: str, title: str, base: int = 0, span: int = 100):
+        self.workspace_id = workspace_id
+        self.stage = stage
+        self.title = title
+        self.base = base
+        self.span = span
+        self.started_at = time.time()
+        self.percent = base
+        self.phase = ""
+        self._last_emit = 0.0
 
-    speed_bps = None
-    m_speed = _RE_GIT_SPEED.search(line or "")
-    if m_speed:
-        try:
-            speed_bps = _to_bytes(float(m_speed.group(1)), m_speed.group(2).replace("/s", ""))
-        except Exception:
-            speed_bps = None
+    def _map(self, phase_lo: int, phase_hi: int, pct: int) -> int:
+        lo = self.base + (phase_lo * self.span) // 100
+        hi = self.base + (phase_hi * self.span) // 100
+        return lo + ((hi - lo) * max(0, min(100, pct))) // 100
 
-    elapsed = max(0, int(time.time() - started_at))
-    eta = None
-    if pct and pct > 0 and pct < 100:
-        eta = int((elapsed * (100 - pct)) / pct)
+    def emit(self, message: str = "", *, force: bool = False, status: str = "running", extra: dict | None = None):
+        now = time.time()
+        if not force and (now - self._last_emit) < 0.25:
+            return
+        self._last_emit = now
+        elapsed = max(0, int(now - self.started_at))
+        payload = {
+            "type": "progress",
+            "status": status,
+            "stage": self.stage,
+            "title": self.title,
+            "phase": self.phase,
+            "percent": self.percent,
+            "indeterminate": self.phase == "",
+            "elapsed_sec": elapsed,
+        }
+        if message:
+            payload["message"] = message[:200]
+        if extra:
+            payload.update(extra)
+        set_repo_progress(self.workspace_id, payload)
 
-    out = {"elapsed_sec": elapsed}
-    if pct is not None:
-        out["percent"] = pct
-    if speed_bps is not None:
-        out["speed_bps"] = speed_bps
-    if eta is not None:
-        out["eta_sec"] = max(0, eta)
-    return out
+    def feed_line(self, line: str):
+        text = (line or "").strip()
+        if not text:
+            return
+        extra: dict[str, int] = {}
+        matched_phase = False
+        for name, pattern, lo, hi in _GIT_PHASES:
+            if not pattern.search(text):
+                continue
+            m = _RE_GIT_PHASE_PERCENT.search(text)
+            pct = int(m.group(1)) if m else 0
+            mapped = self._map(lo, hi, pct)
+            if mapped > self.percent:
+                self.percent = mapped
+            self.phase = name
+            matched_phase = True
+            break
+        speed = _RE_GIT_SPEED.search(text)
+        if speed:
+            try:
+                extra["speed_bps"] = _to_bytes(float(speed.group(1)), speed.group(2))
+            except Exception:
+                pass
+        elapsed = max(1, int(time.time() - self.started_at))
+        done = self.percent - self.base
+        if done > 0 and done < self.span:
+            extra["eta_sec"] = max(0, int(elapsed * (self.span - done) / done))
+        self.emit(text, force=matched_phase, extra=extra)
 
-
-def _git_auth_args(git_url: str, username: str, token: str) -> list[str]:
-    if not token:
-        return []
-    try:
-        parsed = urlparse(git_url)
-        if not parsed.scheme.startswith("http") or not parsed.hostname:
-            return []
-        user = username or "oauth2"
-        base = f"{parsed.scheme}://{parsed.hostname}/"
-        auth_prefix = f"{parsed.scheme}://{quote(user)}:{quote(token)}@{parsed.hostname}/"
-        return ["-c", f'url.{auth_prefix}.insteadOf={base}']
-    except Exception:
-        return []
+    def finish(self, ok: bool):
+        if ok:
+            self.percent = self.base + self.span
+        self.emit(force=True, status="running" if ok else "failed")
 
 
 def _stream_command_with_progress(
@@ -256,12 +314,10 @@ def _stream_command_with_progress(
     *,
     log_file: Path,
     env: dict,
-    stage: str,
-    title: str,
+    tracker: _GitProgressTracker,
     on_started=None,
 ) -> int:
-    started_at = time.time()
-    _repo_set_progress({"type": "progress", "status": "running", "stage": stage, "title": title, "percent": 0, "elapsed_sec": 0})
+    tracker.emit(force=True)
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -273,38 +329,29 @@ def _stream_command_with_progress(
     if on_started:
         on_started(proc.pid)
     assert proc.stdout
-    with log_file.open("ab") as lf:
-        while True:
-            chunk = proc.stdout.read(4096)
-            if chunk == "":
-                break
-            lf.write(chunk.encode("utf-8", errors="ignore"))
-            lf.flush()
-            for line in re.split(r"[\r\n]+", chunk):
-                text = line.strip()
-                if not text:
-                    continue
-                payload = _repo_progress_from_line(text, started_at)
-                _repo_set_progress(
-                    {
-                        "type": "progress",
-                        "status": "running",
-                        "stage": stage,
-                        "title": title,
-                        "message": text,
-                        **payload,
-                    }
-                )
-    rc = proc.wait()
-    if on_started:
-        on_started(None)
+    try:
+        with log_file.open("ab") as lf:
+            while True:
+                chunk = proc.stdout.read(4096)
+                if chunk == "":
+                    break
+                lf.write(chunk.encode("utf-8", errors="ignore"))
+                lf.flush()
+                for line in re.split(r"[\r\n]+", chunk):
+                    tracker.feed_line(line)
+        rc = proc.wait()
+    finally:
+        if on_started:
+            on_started(None)
+    tracker.finish(rc == 0)
     return rc
 
 
 class _FirmwareProgressTracker:
-    # Трекер публикует progress в Redis для WS UI, включая heartbeat если лог молчит.
-    def __init__(self, job_id: str, known_keys: list[str], phase: str = "download"):
+    # Publishes progress to Redis for the websocket UI, with a heartbeat for silent logs
+    def __init__(self, job_id: str, scope: str, known_keys: list[str], phase: str = "download"):
         self.job_id = job_id
+        self.scope = scope
         self.known_keys = [x for x in known_keys if x]
         self.current_key = self.known_keys[0] if len(self.known_keys) == 1 else ""
         self.started_keys: set[str] = set()
@@ -313,7 +360,7 @@ class _FirmwareProgressTracker:
         self.phase = phase
 
     def feed(self, text: str):
-        # Кормим сырыми чанками stdout/stderr; внутри сами режем по \r и \n.
+        # Fed with raw stdout/stderr chunks; the split on \r and \n happens here
         for part in re.split(r"[\r\n]+", text):
             line = part.strip()
             if not line:
@@ -335,6 +382,7 @@ class _FirmwareProgressTracker:
             self._started_at.setdefault(key, time.time())
             effective_elapsed = int(time.time() - self._started_at[key])
             set_progress(
+                self.scope,
                 key,
                 {
                     "type": "progress",
@@ -347,13 +395,14 @@ class _FirmwareProgressTracker:
             )
 
     def heartbeat(self):
-        # Heartbeat keeps UI alive, useful когда extract не печатает процент.
+        # Heartbeat keeps the bar alive while extract prints no percentage at all
         targets = self.started_keys or set(self.known_keys)
         now = time.time()
         for key in targets:
             self._started_at.setdefault(key, now)
             last_pct = self._last_emit.get(key, (0, 0.0))[0]
             set_progress(
+                self.scope,
                 key,
                 {
                     "type": "progress",
@@ -361,49 +410,45 @@ class _FirmwareProgressTracker:
                     "phase": self.phase,
                     "job_id": self.job_id,
                     "percent": max(0, last_pct),
+                    "indeterminate": last_pct <= 0,
                     "elapsed_sec": int(now - self._started_at[key]),
                 },
             )
 
-    def finalize(self, ok: bool):
-        # Финализируем состояние progress как completed/failed.
+    def finalize(self, ok: bool, status: str | None = None):
+        # Settle the entry as completed/failed; terminal entries
+        # get a short TTL in Redis so they cannot resurrect after a reload
         targets = sorted(self.started_keys or set(self.known_keys))
         if not targets:
             return
+        final_status = status or ("completed" if ok else "failed")
         for key in targets:
             set_progress(
+                self.scope,
                 key,
                 {
                     "type": "progress",
-                    "status": "completed" if ok else "failed",
+                    "status": final_status,
                     "phase": self.phase,
                     "job_id": self.job_id,
                     "percent": 100 if ok else self._last_emit.get(key, (0, 0.0))[0],
+                    "indeterminate": False,
                 },
             )
 
 
-def run_extract_samsung_fw(fw_key: str, target_codename: str):
-    model, csc = ("", "")
-    if "_" in fw_key:
-        model, csc = fw_key.split("_", 1)
-    if not model or not csc:
-        raise ValueError("Invalid fw key")
-
-    firmware = f"{model}/{csc}/350000000000000"
-    cmd = (
-        f"cd {shlex.quote(settings.un1ca_root)} && "
-        f"source buildenv.sh {shlex.quote(target_codename)} && "
-        f"scripts/extract_fw.sh --ignore-source --ignore-target --force {shlex.quote(firmware)}"
-    )
-
-    env = os.environ.copy()
-    env.setdefault("PYTHONUNBUFFERED", "1")
-    subprocess.check_call(["bash", "-lc", cmd], env=env)
+def _job_status(db, job_id: str) -> str:
+    # Cancellation is written by a different session, so the identity map has to
+    # be dropped or we keep reading the status we wrote ourselves
+    job = db.get(BuildJob, job_id)
+    if not job:
+        return ""
+    db.refresh(job)
+    return str(job.status or "")
 
 
 def _run_operation_job(job_id: str, operation):
-    # Общая обертка operation jobs: status lifecycle + log_path + error handling.
+    # Shared wrapper for operation jobs: status lifecycle, log_path, error handling
     db = SessionLocal()
     try:
         job = db.get(BuildJob, job_id)
@@ -411,29 +456,38 @@ def _run_operation_job(job_id: str, operation):
             return
         if job.status == "canceled":
             return
-        Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)
+        ctx = _workspace_context(db, job)
+        ctx.logs.mkdir(parents=True, exist_ok=True)
         op_name = _safe_target(job.operation_name or "operation")
-        log_file = Path(settings.logs_dir) / f"{op_name}-{job.id}.log"
+        log_file = ctx.logs / f"{op_name}-{job.id}.log"
         job.status = "running"
         job.started_at = _now()
         job.log_path = str(log_file)
         db.commit()
-        operation(log_file)
+        publish_job_event(job)
+        operation(log_file, ctx)
+        if _job_status(db, job_id) == "canceled":
+            return
         job = db.get(BuildJob, job_id)
         if job:
             job.status = "succeeded"
             job.return_code = 0
             job.finished_at = _now()
             db.commit()
-    except Exception as exc:  # noqa: BLE001
+            publish_job_event(job)
+            notify_job(job)
+    except Exception as exc:
+        if _job_status(db, job_id) == "canceled":
+            return
         job = db.get(BuildJob, job_id)
         if job:
-            if job.status != "canceled":
-                job.status = "failed"
-                job.error = str(exc)
-                job.return_code = 1
-                job.finished_at = _now()
-                db.commit()
+            job.status = "failed"
+            job.error = str(exc)
+            job.return_code = 1
+            job.finished_at = _now()
+            db.commit()
+            publish_job_event(job)
+            notify_job(job)
     finally:
         db.close()
 
@@ -451,23 +505,22 @@ def _set_job_pid(job_id: str, pid: int | None):
 
 
 def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
-    # Extract FW from ODIN cache into out/fw, always with --force for consistent result.
-    def _op(log_file: Path):
+    # Extract FW from ODIN cache into out/fw, always with --force for consistent result
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
         cmd = (
-            f"cd {shlex.quote(settings.un1ca_root)} && "
+            f"cd {shlex.quote(str(ctx.root))} && "
             f"source buildenv.sh {shlex.quote(target_codename)} && "
             f"scripts/extract_fw.sh --ignore-source --ignore-target --force "
             f"{shlex.quote(fw_key.replace('_', '/', 1) + '/350000000000000')}"
         )
-        out_root = Path(settings.out_dir)
-        odin_dir = out_root / "odin" / fw_key
-        fw_dir = out_root / "fw" / fw_key
+        odin_dir = ctx.out / "odin" / fw_key
+        fw_dir = ctx.out / "fw" / fw_key
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        tracker = _FirmwareProgressTracker(job_id, [fw_key.upper()], phase="extract")
+        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, [fw_key.upper()], phase="extract")
         tracker.heartbeat()
         with log_file.open("ab") as lf:
-            lf.write(f"[extract] fw_key={fw_key} target={target_codename}\n".encode("utf-8"))
+            lf.write(f"[extract] fw_key={fw_key} target={target_codename}\n".encode())
             lf.flush()
             proc = subprocess.Popen(
                 ["bash", "-lc", cmd],
@@ -476,17 +529,12 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
                 env=env,
                 text=True,
                 bufsize=0,
+                preexec_fn=os.setsid,
             )
-            db = SessionLocal()
-            try:
-                job = db.get(BuildJob, job_id)
-                if job:
-                    job.process_pid = proc.pid
-                    db.commit()
-            finally:
-                db.close()
+            _set_job_pid(job_id, proc.pid)
             assert proc.stdout
             ok = False
+            canceled = False
             try:
                 last_heartbeat = 0.0
                 while True:
@@ -501,31 +549,29 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
                         tracker.heartbeat()
                         last_heartbeat = now
                 rc = proc.wait()
-                if rc != 0:
-                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
-                ok = True
-            finally:
                 db = SessionLocal()
                 try:
-                    job = db.get(BuildJob, job_id)
-                    if job:
-                        job.process_pid = None
-                        db.commit()
+                    canceled = _job_status(db, job_id) == "canceled"
                 finally:
                     db.close()
-                tracker.finalize(ok)
-                _invalidate_dir_size_cache_paths([odin_dir, fw_dir, out_root / "odin", out_root / "fw"])
+                if rc != 0 and not canceled:
+                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+                ok = rc == 0
+            finally:
+                _set_job_pid(job_id, None)
+                tracker.finalize(ok, status="canceled" if canceled else None)
+                _invalidate_dir_size_cache_paths([odin_dir, fw_dir, ctx.out / "odin", ctx.out / "fw"])
 
     _run_operation_job(job_id, _op)
 
 
 def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
-    # Delete cached Odin/FW entry from out tree.
-    def _delete(log_file: Path):
-        base = Path(settings.out_dir) / ("odin" if fw_type == "odin" else "fw")
+    # Delete cached Odin/FW entry from out tree
+    def _delete(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        base = ctx.out / ("odin" if fw_type == "odin" else "fw")
         target = base / fw_key
         with log_file.open("ab") as lf:
-            lf.write(f"[delete] fw_type={fw_type} fw_key={fw_key}\n".encode("utf-8"))
+            lf.write(f"[delete] fw_type={fw_type} fw_key={fw_key} path={target}\n".encode())
             lf.flush()
         if not target.exists():
             with log_file.open("ab") as lf:
@@ -534,196 +580,354 @@ def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
         if target.is_dir():
             shutil.rmtree(target, ignore_errors=True)
             with log_file.open("ab") as lf:
-                lf.write(f"[delete] removed directory: {target}\n".encode("utf-8"))
+                lf.write(f"[delete] removed directory: {target}\n".encode())
         else:
             target.unlink(missing_ok=True)
             with log_file.open("ab") as lf:
-                lf.write(f"[delete] removed file: {target}\n".encode("utf-8"))
+                lf.write(f"[delete] removed file: {target}\n".encode())
         _invalidate_dir_size_cache_paths([target, base])
 
     _run_operation_job(job_id, _delete)
 
 
-def run_repo_clone_job(job_id: str, git_url: str, git_ref: str, git_username: str = "", git_token: str = ""):
-    # Clone/update repo with recurse-submodules, same behavior as old init repo-sync.
-    def _op(log_file: Path):
-        root = _repo_root_dir()
+def _git_auth_args(git_url: str, username: str, token: str) -> list[str]:
+    if not token:
+        return []
+    try:
+        parsed = urlparse(git_url)
+        if not parsed.scheme.startswith("http") or not parsed.hostname:
+            return []
+        user = username or "oauth2"
+        base = f"{parsed.scheme}://{parsed.hostname}/"
+        auth_prefix = f"{parsed.scheme}://{quote(user)}:{quote(token)}@{parsed.hostname}/"
+        return ["-c", f"url.{auth_prefix}.insteadOf={base}"]
+    except Exception:
+        return []
+
+
+def _git_cfg_prefix(git_args: list[str]) -> str:
+    if not git_args:
+        return "git"
+    return "git " + " ".join(shlex.quote(x) for x in git_args)
+
+
+def _safe_git_url(url: str) -> str:
+    if "@" not in url or not url.startswith(("http://", "https://")):
+        return url
+    scheme, rest = url.split("://", 1)
+    return f"{scheme}://{rest.split('@', 1)[1]}"
+
+
+def _current_origin(root: Path) -> str:
+    try:
+        out = subprocess.check_output(
+            ["git", "-c", "safe.directory=*", "-C", str(root), "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        ).strip()
+        return _safe_git_url(out)
+    except Exception:
+        return ""
+
+
+def _is_mount(path: Path) -> bool:
+    try:
+        return os.path.ismount(path)
+    except OSError:
+        return False
+
+
+def _checkout_cmd(root: Path, git_cfg: str, git_ref: str) -> str:
+    return (
+        f"cd {shlex.quote(str(root))} && "
+        f"{git_cfg} -c safe.directory=* fetch --all --tags --prune && "
+        f"{{ {git_cfg} -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true; }} && "
+        f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
+        f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
+        f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
+        f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
+        f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
+    )
+
+
+def _replace_tree(src: Path, dst: Path, log_file: Path):
+    # Swap a freshly built tree in for the old one. Renaming is atomic, but the
+    # workspace root can be a bind-mount point, and those cannot be renamed
+    if _is_mount(dst):
+        with log_file.open("ab") as lf:
+            lf.write(f"[repo] {dst} is a mount point, swapping contents in place\n".encode())
+        for item in dst.iterdir():
+            if item.is_dir() and not item.is_symlink():
+                shutil.rmtree(item, ignore_errors=True)
+            else:
+                item.unlink(missing_ok=True)
+        for item in src.iterdir():
+            os.replace(item, dst / item.name)
+        shutil.rmtree(src, ignore_errors=True)
+        return
+    if dst.exists():
+        shutil.rmtree(dst, ignore_errors=True)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dst)
+
+
+def run_repo_clone_job(job_id: str, fresh: bool = False):
+    # Clone is idempotent by default: an existing checkout of the same remote is
+    # fast-forwarded instead of being wiped and re-downloaded. A full re-clone is
+    # an explicit choice, and even then the old tree survives until the new one
+    # is complete
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        root.mkdir(parents=True, exist_ok=True)
-        repo_dir = root
-        clear_repo_progress()
+        clear_repo_progress(ctx.id)
+        git_url = ctx.git_url
+        if not git_url:
+            raise RuntimeError("Workspace has no git url configured")
+        git_args = _git_auth_args(git_url, ctx.git_username, ctx.git_token)
+        git_cfg = _git_cfg_prefix(git_args)
+        safe_url = _safe_git_url(git_url)
+        root = ctx.root
 
-        db = SessionLocal()
+        existing_origin = _current_origin(root) if (root / ".git").is_dir() else ""
+        same_remote = bool(existing_origin) and existing_origin == safe_url
+        if same_remote and not fresh:
+            with log_file.open("ab") as lf:
+                lf.write(f"[repo] existing checkout of {safe_url} found at {root}, updating in place\n".encode())
+            cmd = _checkout_cmd(root, git_cfg, ctx.git_ref)
+            tracker = _GitProgressTracker(ctx.id, "update", f"Update {safe_url} ({ctx.git_ref})")
+            rc = _stream_command_with_progress(
+                ["bash", "-lc", cmd],
+                log_file=log_file,
+                env=env,
+                tracker=tracker,
+                on_started=lambda pid: _set_job_pid(job_id, pid),
+            )
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+            _invalidate_dir_size_cache_paths([root])
+            set_repo_progress(
+                ctx.id,
+                {
+                    "type": "progress",
+                    "status": "completed",
+                    "stage": "update",
+                    "title": "Repository updated",
+                    "percent": 100,
+                },
+            )
+            return
+
+        if existing_origin and not same_remote:
+            with log_file.open("ab") as lf:
+                lf.write(f"[repo] remote changed ({existing_origin} -> {safe_url}), full clone required\n".encode())
+
+        staging = ws_lib.workspaces_root() / f".clone-{job_id}"
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.parent.mkdir(parents=True, exist_ok=True)
         try:
-            job = db.get(BuildJob, job_id)
-            if job:
-                job.process_pid = None
-                db.commit()
+            tracker = _GitProgressTracker(ctx.id, "clone", f"Clone {safe_url}", base=0, span=70)
+            rc = _stream_command_with_progress(
+                ["git", *git_args, "clone", "--progress", "--recurse-submodules", git_url, str(staging)],
+                log_file=log_file,
+                env=env,
+                tracker=tracker,
+                on_started=lambda pid: _set_job_pid(job_id, pid),
+            )
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, ["git", "clone"])
+
+            setup_cmd = _checkout_cmd(staging, git_cfg, ctx.git_ref)
+            tracker = _GitProgressTracker(
+                ctx.id,
+                "submodules",
+                f"Checkout {ctx.git_ref} and sync submodules",
+                base=70,
+                span=30,
+            )
+            rc = _stream_command_with_progress(
+                ["bash", "-lc", setup_cmd],
+                log_file=log_file,
+                env=env,
+                tracker=tracker,
+                on_started=lambda pid: _set_job_pid(job_id, pid),
+            )
+            if rc != 0:
+                raise subprocess.CalledProcessError(rc, ["bash", "-lc", setup_cmd])
+
+            # The out tree holds tens of GB of firmware; carry it over instead of
+            # forcing a re-download. It moves only after the clone has succeeded
+            old_out = root / "out"
+            if old_out.exists():
+                staging_out = staging / "out"
+                if staging_out.exists():
+                    shutil.rmtree(staging_out, ignore_errors=True)
+                try:
+                    os.replace(old_out, staging_out)
+                except OSError:
+                    shutil.move(str(old_out), str(staging_out))
+                with log_file.open("ab") as lf:
+                    lf.write(b"[repo] preserved existing out/ tree\n")
+
+            _replace_tree(staging, root, log_file)
         finally:
-            db.close()
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
 
-        keep_out_src = repo_dir / "out"
-        keep_out_tmp = Path(settings.data_dir) / "tmp-repo-ops" / f"{job_id}-out"
-        if keep_out_src.exists():
-            keep_out_tmp.parent.mkdir(parents=True, exist_ok=True)
-            if keep_out_tmp.exists():
-                shutil.rmtree(keep_out_tmp, ignore_errors=True)
-            shutil.move(str(keep_out_src), str(keep_out_tmp))
-
-        if repo_dir.exists():
-            shutil.rmtree(repo_dir, ignore_errors=True)
-        repo_dir.mkdir(parents=True, exist_ok=True)
-
-        git_args = _git_auth_args(git_url, git_username, git_token)
-        safe_url = git_url
-        if "@" in safe_url and safe_url.startswith(("http://", "https://")):
-            safe_url = safe_url.split("@", 1)[1]
-            safe_url = f"https://{safe_url.split('://')[-1]}"
-        git_cfg = "git"
-        if git_args:
-            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
-        rc = _stream_command_with_progress(
-            ["git", *git_args, "clone", "--progress", "--recurse-submodules", git_url, str(repo_dir)],
-            log_file=log_file,
-            env=env,
-            stage="clone",
-            title=f"Clone {safe_url}",
-            on_started=lambda pid: _set_job_pid(job_id, pid),
+        _invalidate_dir_size_cache_paths([root])
+        set_repo_progress(
+            ctx.id,
+            {
+                "type": "progress",
+                "status": "completed",
+                "stage": "clone",
+                "title": "Repository clone completed",
+                "percent": 100,
+            },
         )
-        if rc != 0:
-            raise subprocess.CalledProcessError(rc, ["git", "clone"])
-
-        setup_cmd = (
-            f"cd {shlex.quote(str(repo_dir))} && "
-            f"{git_cfg} -c safe.directory=* fetch --all --tags --prune && "
-            f"{git_cfg} -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
-            f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
-            f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
-            f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
-            f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
-            f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
-        )
-        rc = _stream_command_with_progress(
-            ["bash", "-lc", setup_cmd],
-            log_file=log_file,
-            env=env,
-            stage="submodules",
-            title=f"Checkout {git_ref} and sync submodules",
-            on_started=lambda pid: _set_job_pid(job_id, pid),
-        )
-        if rc != 0:
-            raise subprocess.CalledProcessError(rc, ["bash", "-lc", setup_cmd])
-        if keep_out_tmp.exists():
-            dst_out = repo_dir / "out"
-            if dst_out.exists():
-                shutil.rmtree(dst_out, ignore_errors=True)
-            shutil.move(str(keep_out_tmp), str(dst_out))
-        _invalidate_dir_size_cache_paths([repo_dir])
-        _repo_set_progress({"type": "progress", "status": "completed", "stage": "clone", "title": "Repository clone completed", "percent": 100})
 
     _run_operation_job(job_id, _op)
 
 
-def run_repo_pull_job(job_id: str, git_ref: str, git_url: str, git_username: str = "", git_token: str = ""):
-    def _op(log_file: Path):
-        root = _repo_root_dir()
-        if not (root / ".git").is_dir():
+def run_repo_pull_job(job_id: str):
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        if not (ctx.root / ".git").is_dir():
             raise RuntimeError("Repository is not cloned yet")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        clear_repo_progress()
-        git_args = _git_auth_args(git_url, git_username, git_token)
-        git_cfg = "git"
-        if git_args:
-            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
+        clear_repo_progress(ctx.id)
+        git_args = _git_auth_args(ctx.git_url, ctx.git_username, ctx.git_token)
+        git_cfg = _git_cfg_prefix(git_args)
         cmd = (
-            f"cd {shlex.quote(str(root))} && "
+            f"cd {shlex.quote(str(ctx.root))} && "
             f"{git_cfg} -c safe.directory=* fetch --all --tags --prune && "
-            f"{git_cfg} -c safe.directory=* fetch origin {shlex.quote(git_ref)} --prune || true && "
-            f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(git_ref)} && "
-            f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
-            f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi"
+            f"{{ {git_cfg} -c safe.directory=* fetch origin {shlex.quote(ctx.git_ref)} --prune || true; }} && "
+            f"{git_cfg} -c safe.directory=* checkout -f {shlex.quote(ctx.git_ref)} && "
+            f"if {git_cfg} -c safe.directory=* rev-parse --verify "
+            f"origin/{shlex.quote(ctx.git_ref)} >/dev/null 2>&1; then "
+            f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(ctx.git_ref)}; fi"
         )
+        tracker = _GitProgressTracker(ctx.id, "pull", f"Update repository ({ctx.git_ref})")
         rc = _stream_command_with_progress(
             ["bash", "-lc", cmd],
             log_file=log_file,
             env=env,
-            stage="pull",
-            title=f"Update repository ({git_ref})",
+            tracker=tracker,
             on_started=lambda pid: _set_job_pid(job_id, pid),
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
-        _invalidate_dir_size_cache_paths([root])
-        _repo_set_progress({"type": "progress", "status": "completed", "stage": "pull", "title": "Repository updated", "percent": 100})
+        _invalidate_dir_size_cache_paths([ctx.root])
+        set_repo_progress(
+            ctx.id,
+            {"type": "progress", "status": "completed", "stage": "pull", "title": "Repository updated", "percent": 100},
+        )
 
     _run_operation_job(job_id, _op)
 
 
-def run_repo_submodules_job(job_id: str, git_url: str, git_username: str = "", git_token: str = ""):
-    def _op(log_file: Path):
-        root = _repo_root_dir()
-        if not (root / ".git").is_dir():
+def run_repo_submodules_job(job_id: str):
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        if not (ctx.root / ".git").is_dir():
             raise RuntimeError("Repository is not cloned yet")
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        clear_repo_progress()
-        git_args = _git_auth_args(git_url, git_username, git_token)
-        git_cfg = "git"
-        if git_args:
-            git_cfg = "git " + " ".join(shlex.quote(x) for x in git_args)
+        clear_repo_progress(ctx.id)
+        git_args = _git_auth_args(ctx.git_url, ctx.git_username, ctx.git_token)
+        git_cfg = _git_cfg_prefix(git_args)
         cmd = (
-            f"cd {shlex.quote(str(root))} && "
+            f"cd {shlex.quote(str(ctx.root))} && "
             f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
             f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
         )
+        tracker = _GitProgressTracker(ctx.id, "submodules", "Update submodules")
         rc = _stream_command_with_progress(
             ["bash", "-lc", cmd],
             log_file=log_file,
             env=env,
-            stage="submodules",
-            title="Update submodules",
+            tracker=tracker,
             on_started=lambda pid: _set_job_pid(job_id, pid),
         )
         if rc != 0:
             raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
-        _invalidate_dir_size_cache_paths([root])
-        _repo_set_progress({"type": "progress", "status": "completed", "stage": "submodules", "title": "Submodules updated", "percent": 100})
+        _invalidate_dir_size_cache_paths([ctx.root])
+        set_repo_progress(
+            ctx.id,
+            {
+                "type": "progress",
+                "status": "completed",
+                "stage": "submodules",
+                "title": "Submodules updated",
+                "percent": 100,
+            },
+        )
 
     _run_operation_job(job_id, _op)
 
 
 def run_repo_delete_job(job_id: str, mode: str = "repo_only"):
-    def _op(log_file: Path):
-        root = _repo_root_dir()
-        clear_repo_progress()
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        root = ctx.root
+        clear_repo_progress(ctx.id)
         with log_file.open("ab") as lf:
-            lf.write(f"[repo-delete] mode={mode} path={root}\n".encode("utf-8"))
+            lf.write(f"[repo-delete] mode={mode} path={root}\n".encode())
             lf.flush()
         if root.exists():
-            if mode == "repo_with_out":
-                shutil.rmtree(root, ignore_errors=True)
-                root.mkdir(parents=True, exist_ok=True)
-            else:
-                for item in root.iterdir():
-                    if item.name == "out":
-                        continue
-                    if item.is_dir():
-                        shutil.rmtree(item, ignore_errors=True)
-                    else:
-                        item.unlink(missing_ok=True)
+            for item in root.iterdir():
+                if mode != "repo_with_out" and item.name == "out":
+                    continue
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+        root.mkdir(parents=True, exist_ok=True)
         _invalidate_dir_size_cache_paths([root])
         title = "Repository removed with out" if mode == "repo_with_out" else "Repository removed, out preserved"
-        _repo_set_progress({"type": "progress", "status": "completed", "stage": "delete", "title": title, "percent": 100})
+        set_repo_progress(
+            ctx.id,
+            {"type": "progress", "status": "completed", "stage": "delete", "title": title, "percent": 100},
+        )
+
+    _run_operation_job(job_id, _op)
+
+
+def run_workspace_delete_job(job_id: str, target_workspace_id: str, delete_files: bool):
+    # The workspace row is dropped by the API; this job only reclaims the disk
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        db = SessionLocal()
+        try:
+            ws = db.get(Workspace, target_workspace_id)
+        finally:
+            db.close()
+        with log_file.open("ab") as lf:
+            lf.write(f"[workspace-delete] id={target_workspace_id} delete_files={delete_files}\n".encode())
+            lf.flush()
+        if not delete_files:
+            return
+        root = ws_lib.root_path(ws) if ws is not None else None
+        if root is None or not root.exists():
+            with log_file.open("ab") as lf:
+                lf.write(b"[workspace-delete] nothing on disk to remove\n")
+            return
+        if _is_mount(root):
+            for item in root.iterdir():
+                if item.is_dir() and not item.is_symlink():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+        with log_file.open("ab") as lf:
+            lf.write(f"[workspace-delete] removed {root}\n".encode())
+        _invalidate_dir_size_cache_paths([root])
 
     _run_operation_job(job_id, _op)
 
 
 def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
-    # Worker-side stop: only worker can safely signal build process group.
+    # Worker-side stop: only worker can safely signal build process group
     def _is_alive(pid: int) -> bool:
-        # Проверяем process group first, потому что build запускается в отдельной pgid.
+        # Check the process group first: the build runs in its own pgid
         try:
             os.killpg(pid, 0)
             return True
@@ -736,7 +940,7 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
                 return False
             if exc.errno == errno.EPERM:
                 return True
-        # Fallback: check process directly.
+        # Fallback: check process directly
         try:
             os.kill(pid, 0)
             return True
@@ -752,6 +956,7 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
         job = db.get(BuildJob, job_id)
         if not job:
             return
+        db.refresh(job)
         if job.status in {"succeeded", "failed", "reused", "canceled"}:
             return
 
@@ -765,7 +970,7 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
                 except Exception:
                     pass
 
-            # Confirm termination before marking canceled. If still alive, keep running so user can retry stop.
+            # Confirm termination before marking canceled. If still alive, keep running so user can retry stop
             timeout_sec = 5 if signal_type == "sigkill" else 25
             deadline = time.time() + timeout_sec
             while time.time() < deadline:
@@ -775,7 +980,11 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
 
             if not _is_alive(job.process_pid):
                 job.status = "canceled"
-                job.error = "Build canceled by user (SIGKILL)" if signal_type == "sigkill" else "Build canceled by user (SIGTERM)"
+                job.error = (
+                    "Build canceled by user (SIGKILL)"
+                    if signal_type == "sigkill"
+                    else "Build canceled by user (SIGTERM)"
+                )
                 job.finished_at = _now()
                 job.process_pid = None
             else:
@@ -784,20 +993,35 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
                     f"({signal_type.upper()}), but process is still running. Retry stop if needed."
                 )
             db.commit()
+            publish_job_event(job)
             return
         if job.status == "running" and not job.process_pid:
-            job.error = (
-                "Stop requested by user, but build PID is missing. "
-                "Please retry stop or check worker logs."
-            )
+            job.error = "Stop requested by user, but build PID is missing. Please retry stop or check worker logs."
             db.commit()
             return
     finally:
         db.close()
 
 
+def _pick_artifact(out_dir: Path, started_at: float) -> str | None:
+    # Only a zip produced by this run counts. Without the mtime guard a build
+    # that produced nothing would happily adopt someone else's older artifact
+    matches = []
+    for path in glob.glob(str(out_dir / "UN1CA_*.zip")):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime + 1.0 >= started_at:
+            matches.append((mtime, path))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][1]
+
+
 def run_build_job(job_id: str):
-    # Основная build pipeline: overrides, extra mods, debloat patching, make_rom, artifact detect.
+    # Main build pipeline: overrides, extra mods, debloat patching, make_rom, artifact detect
     db = SessionLocal()
     extra_mods_tmp_dir = None
     injected_mod_dirs: list[Path] = []
@@ -805,6 +1029,7 @@ def run_build_job(job_id: str):
     mods_override_state: dict | None = None
     debloat_override_paths: tuple[Path, Path] | None = None
     ff_override_paths: tuple[Path, Path] | None = None
+    ctx: ws_lib.WorkspaceRef | None = None
     try:
         job = db.get(BuildJob, job_id)
         if not job:
@@ -812,13 +1037,16 @@ def run_build_job(job_id: str):
         if job.status == "canceled":
             return
 
-        Path(settings.logs_dir).mkdir(parents=True, exist_ok=True)
-        log_file = Path(settings.logs_dir) / f"{_safe_target(job.target)}-{job.id}.log"
+        ctx = _workspace_context(db, job)
+        ctx.logs.mkdir(parents=True, exist_ok=True)
+        log_file = ctx.logs / f"{_safe_target(job.target)}-{job.id}.log"
 
         job.status = "running"
         job.started_at = _now()
         job.log_path = str(log_file)
         db.commit()
+        publish_job_event(job)
+        run_started_at = time.time()
 
         flags = []
         if job.force:
@@ -841,14 +1069,14 @@ def run_build_job(job_id: str):
             override_exports.append(f"export ROM_VERSION={shlex.quote(rom_version)}")
 
         if job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
-            # Extra mods применяем только на время этой сборки:
-            # - если мод новый, просто добавляем его в unica/mods
-            # - если имя совпадает с оригинальным модом, временно полностью заменяем оригинал
+            # Extra mods exist for this one build only:
+            # - a new module is just dropped into unica/mods
+            # - a name clash replaces the original module, which is restored in finally
             extra_mods_tmp_dir = Path(settings.data_dir) / "tmp-extra-mods" / job.id
             extra_mods_tmp_dir.mkdir(parents=True, exist_ok=True)
             validated = validate_mods_archive(Path(job.extra_mods_archive_path), extra_mods_tmp_dir)
             modules_root = Path(validated["modules_root"])
-            target_mods_dir = Path(settings.un1ca_root) / "unica" / "mods"
+            target_mods_dir = ctx.root / "unica" / "mods"
             target_mods_dir.mkdir(parents=True, exist_ok=True)
             backup_mods_root = extra_mods_tmp_dir / "_original_mods_backup"
             backup_mods_root.mkdir(parents=True, exist_ok=True)
@@ -868,31 +1096,27 @@ def run_build_job(job_id: str):
             if "--force" not in flags:
                 flags.append("--force")
         if job.debloat_disabled_json or job.debloat_add_system_json or job.debloat_add_product_json:
-            # Debloat overrides тоже временные: patch before build, restore in finally.
+            # Debloat overrides are temporary too: patch before the build, restore in finally
             try:
                 disabled_ids = json.loads(job.debloat_disabled_json or "[]")
                 add_system = json.loads(job.debloat_add_system_json or "[]")
                 add_product = json.loads(job.debloat_add_product_json or "[]")
                 if isinstance(disabled_ids, list) and isinstance(add_system, list) and isinstance(add_product, list):
                     debloat_override_paths = apply_debloat_overrides(
-                        Path(settings.un1ca_root),
+                        ctx.root,
                         disabled_ids,
                         add_system,
                         add_product,
                     )
-                if debloat_override_paths:
-                    if "--force" not in flags:
-                        flags.append("--force")
+                if debloat_override_paths and "--force" not in flags:
+                    flags.append("--force")
             except Exception:
                 pass
         if job.mods_disabled_json:
             try:
                 mods_disabled = json.loads(job.mods_disabled_json or "[]")
                 if isinstance(mods_disabled, list):
-                    mods_override_state = apply_mods_disabled_overrides(
-                        Path(settings.un1ca_root),
-                        mods_disabled,
-                    )
+                    mods_override_state = apply_mods_disabled_overrides(ctx.root, mods_disabled)
                 if mods_override_state and "--force" not in flags:
                     flags.append("--force")
             except Exception:
@@ -901,16 +1125,16 @@ def run_build_job(job_id: str):
             try:
                 overrides = json.loads(job.ff_overrides_json or "{}")
                 if isinstance(overrides, dict) and job.source_firmware and job.target_firmware:
-                    _ensure_fw_extracted(job.target, job.source_firmware, job.target_firmware)
+                    _ensure_fw_extracted(ctx, job.target, job.source_firmware, job.target_firmware)
                     fw_key = _firmware_key_from_value(job.target_firmware)
-                    ff_xml = Path(settings.out_dir) / "fw" / fw_key / "system/system/etc/floating_feature.xml"
+                    ff_xml = ctx.out / "fw" / fw_key / "system/system/etc/floating_feature.xml"
                     ff_override_paths = apply_ff_overrides(ff_xml, overrides)
                     if ff_override_paths and "--force" not in flags:
                         flags.append("--force")
             except Exception:
                 pass
 
-        cmd = f"cd {shlex.quote(settings.un1ca_root)} && source buildenv.sh {shlex.quote(job.target)} && "
+        cmd = f"cd {shlex.quote(str(ctx.root))} && source buildenv.sh {shlex.quote(job.target)} && "
         if override_exports:
             cmd += " && ".join(override_exports) + " && "
         cmd += f"scripts/make_rom.sh {' '.join(shlex.quote(x) for x in flags)}"
@@ -919,6 +1143,7 @@ def run_build_job(job_id: str):
         env.setdefault("PYTHONUNBUFFERED", "1")
         tracker = _FirmwareProgressTracker(
             job.id,
+            ctx.fw_scope,
             [
                 _firmware_key_from_value(job.source_firmware),
                 _firmware_key_from_value(job.target_firmware),
@@ -926,6 +1151,7 @@ def run_build_job(job_id: str):
             phase="download",
         )
 
+        rc = 1
         with log_file.open("ab") as lf:
             proc = subprocess.Popen(
                 ["bash", "-lc", cmd],
@@ -945,7 +1171,14 @@ def run_build_job(job_id: str):
             current_pct = 0
             set_build_progress(
                 job.id,
-                {"type": "progress", "status": "running", "stage": current_stage, "percent": current_pct},
+                {
+                    "type": "progress",
+                    "status": "running",
+                    "stage": current_stage,
+                    "percent": current_pct,
+                    "indeterminate": True,
+                    "workspace_id": ctx.id,
+                },
             )
             try:
                 last_heartbeat = 0.0
@@ -961,7 +1194,9 @@ def run_build_job(job_id: str):
                         if not text:
                             continue
                         for stage, pct, pattern in _BUILD_STAGE_RULES:
-                            if pattern.search(text) and pct >= current_pct:
+                            if not pattern.search(text):
+                                continue
+                            if pct >= current_pct:
                                 current_stage = stage
                                 current_pct = pct
                                 set_build_progress(
@@ -971,10 +1206,12 @@ def run_build_job(job_id: str):
                                         "status": "running",
                                         "stage": current_stage,
                                         "percent": current_pct,
+                                        "indeterminate": False,
                                         "message": text[:200],
+                                        "workspace_id": ctx.id,
                                     },
                                 )
-                                break
+                            break
                     now = time.time()
                     if now - last_heartbeat >= 1.0:
                         tracker.heartbeat()
@@ -982,10 +1219,9 @@ def run_build_job(job_id: str):
                 rc = proc.wait()
                 ok = rc == 0
             finally:
-                tracker.finalize(ok)
-                status = "completed" if ok else "failed"
-                if job.status == "canceled":
-                    status = "canceled"
+                canceled = _job_status(db, job_id) == "canceled"
+                status = "canceled" if canceled else ("completed" if ok else "failed")
+                tracker.finalize(ok, status="canceled" if canceled else None)
                 set_build_progress(
                     job.id,
                     {
@@ -993,38 +1229,44 @@ def run_build_job(job_id: str):
                         "status": status,
                         "stage": "done" if ok else current_stage,
                         "percent": 100 if ok else current_pct,
+                        "indeterminate": False,
+                        "workspace_id": ctx.id,
                     },
                 )
 
-        refreshed = db.get(BuildJob, job_id)
-        if refreshed:
-            refreshed.process_pid = None
-            db.commit()
-
+        job = db.get(BuildJob, job_id)
+        if not job:
+            return
+        db.refresh(job)
+        job.process_pid = None
         job.return_code = rc
         job.finished_at = _now()
         if job.status == "canceled":
             job.error = job.error or "Build canceled by user"
         elif rc == 0:
             job.status = "succeeded"
-            pattern = str(Path(settings.out_dir) / "UN1CA_*.zip")
-            matches = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-            if matches:
-                job.artifact_path = matches[0]
+            if not job.no_rom_zip:
+                artifact = _pick_artifact(ctx.out, run_started_at)
+                if artifact:
+                    job.artifact_path = artifact
         else:
             job.status = "failed"
             job.error = f"Build failed with return code {rc}"
         db.commit()
+        publish_job_event(job)
+        notify_job(job)
 
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         job = db.get(BuildJob, job_id)
         if job:
+            db.refresh(job)
             if job.status != "canceled":
                 job.status = "failed"
                 job.error = str(exc)
             job.finished_at = _now()
             job.process_pid = None
             db.commit()
+            publish_job_event(job)
     finally:
         for mod_dir in injected_mod_dirs:
             if mod_dir.exists():
@@ -1050,17 +1292,17 @@ def run_build_job(job_id: str):
             except Exception:
                 pass
         # Build may download/extract firmware and mutate out tree, invalidate size cache keys.
-        # Also invalidate source/target fw specific dirs to reflect updated markers/sizes immediately.
-        source_key = ""
-        target_key = ""
-        if job:
-            source_key = _firmware_key_from_value(job.source_firmware)
-            target_key = _firmware_key_from_value(job.target_firmware)
-        out_root = Path(settings.out_dir)
-        paths = [out_root / "odin", out_root / "fw"]
-        if source_key:
-            paths.extend([out_root / "odin" / source_key, out_root / "fw" / source_key])
-        if target_key and target_key != source_key:
-            paths.extend([out_root / "odin" / target_key, out_root / "fw" / target_key])
-        _invalidate_dir_size_cache_paths(paths)
+        # Also invalidate source/target fw specific dirs to reflect updated markers/sizes immediately
+        if ctx is not None:
+            source_key = ""
+            target_key = ""
+            if job:
+                source_key = _firmware_key_from_value(job.source_firmware)
+                target_key = _firmware_key_from_value(job.target_firmware)
+            paths = [ctx.out / "odin", ctx.out / "fw"]
+            if source_key:
+                paths.extend([ctx.out / "odin" / source_key, ctx.out / "fw" / source_key])
+            if target_key and target_key != source_key:
+                paths.extend([ctx.out / "odin" / target_key, ctx.out / "fw" / target_key])
+            _invalidate_dir_size_cache_paths(paths)
         db.close()

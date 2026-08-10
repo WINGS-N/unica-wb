@@ -1,0 +1,35 @@
+name: unica-wb
+version: ${VERSION}
+version_schema: none
+section: devel
+priority: optional
+maintainer: WINGS-N <wings-n@users.noreply.github.com>
+description: |
+  UN1CA Build launcher.
+  Starts the build stack in Docker and opens the build interface.
+vendor: WINGS-N
+homepage: https://github.com/WINGS-N/unica-wb
+license: GPL-3.0-or-later
+arch: ${ARCH}
+
+depends:
+  - docker.io | docker-ce
+  - libgtk-4-1
+  - libwebkitgtk-6.0-4
+
+contents:
+  - src: ../../bin/unica-wb
+    dst: /usr/bin/unica-wb
+    file_info:
+      mode: 0755
+  - src: ../../../docker-compose.yml
+    dst: /usr/share/unica-wb/docker-compose.yml
+  - src: ../../../docker-compose.local-repo.yml
+    dst: /usr/share/unica-wb/docker-compose.local-repo.yml
+  - src: ./unica-wb.desktop
+    dst: /usr/share/applications/unica-wb.desktop
+  - src: ./unica-wb.png
+    dst: /usr/share/icons/hicolor/512x512/apps/unica-wb.png
+  - src: ../../seed-images
+    dst: /usr/share/unica-wb/seed-images
+    type: tree

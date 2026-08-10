@@ -1,0 +1,5 @@
+dist
+node_modules
+public/fonts
+public/devices
+pnpm-lock.yaml

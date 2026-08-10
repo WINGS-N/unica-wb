@@ -1,4 +1,5 @@
 from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -22,6 +23,7 @@ class BuildJobCreate(BaseModel):
 
 class BuildJobRead(BaseModel):
     id: str
+    workspace_id: str | None = None
     job_kind: str | None = None
     operation_name: str | None = None
     target: str
@@ -62,6 +64,7 @@ class StopJobRequest(BaseModel):
 
 class RepoConfigUpdate(BaseModel):
     git_url: str = Field(min_length=8, max_length=512)
+    git_ref: str | None = Field(default=None, max_length=128)
     git_username: str | None = Field(default=None, max_length=128)
     git_token: str | None = Field(default=None, max_length=512)
 
@@ -69,3 +72,32 @@ class RepoConfigUpdate(BaseModel):
 class AdvancedSettingsUpdate(BaseModel):
     source_config_override: str | None = Field(default=None, max_length=128)
     targets_override: str | None = Field(default=None, max_length=4096)
+
+
+class WorkspaceCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=128)
+    git_url: str = Field(min_length=8, max_length=512)
+    git_ref: str | None = Field(default=None, max_length=128)
+    git_username: str | None = Field(default=None, max_length=128)
+    git_token: str | None = Field(default=None, max_length=512)
+    shared_fw_cache: bool = True
+    clone_now: bool = True
+
+
+class WorkspaceUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    git_url: str | None = Field(default=None, min_length=8, max_length=512)
+    git_ref: str | None = Field(default=None, max_length=128)
+    git_username: str | None = Field(default=None, max_length=128)
+    git_token: str | None = Field(default=None, max_length=512)
+    shared_fw_cache: bool | None = None
+
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str = Field(min_length=8, max_length=1024)
+    keys: dict[str, str]
+    language: str | None = Field(default=None, max_length=8)
+
+
+class PushSubscriptionDelete(BaseModel):
+    endpoint: str = Field(min_length=8, max_length=1024)

@@ -13,3 +13,13 @@ __pycache__/
 
 # ignore k8s atm
 k8s
+
+desktop/bin/
+desktop/dist/
+desktop/seed-images/*.tar
+desktop/seed-images/*.tar.zst
+desktop/seed-images/manifest.json
+
+# The SPA is built into the launcher binary; only the placeholder is tracked
+desktop/internal/webui/dist/*
+!desktop/internal/webui/dist/.gitkeep

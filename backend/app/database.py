@@ -3,7 +3,23 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from .config import settings
 
-engine = create_engine(settings.database_url, future=True)
+
+def _engine_kwargs() -> dict:
+    kwargs = {
+        "future": True,
+        "pool_size": 20,
+        "max_overflow": 40,
+        "pool_timeout": 10,
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+    }
+    if settings.database_url.startswith("sqlite"):
+        # Sessions are handed to worker threads
+        kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
+    return kwargs
+
+
+engine = create_engine(settings.database_url, **_engine_kwargs())
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 Base = declarative_base()
 
@@ -61,6 +77,8 @@ def run_migrations():
         statements.append("ALTER TABLE build_jobs ADD COLUMN mods_disabled_json TEXT")
     if "ff_overrides_json" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN ff_overrides_json TEXT")
+    if "workspace_id" not in cols:
+        statements.append("ALTER TABLE build_jobs ADD COLUMN workspace_id VARCHAR(36)")
 
     if not statements:
         return
@@ -69,4 +87,8 @@ def run_migrations():
         for stmt in statements:
             conn.execute(text(stmt))
         if "build_signature" not in cols:
-            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_build_jobs_build_signature ON build_jobs (build_signature)"))
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_build_jobs_build_signature ON build_jobs (build_signature)")
+            )
+        if "workspace_id" not in cols:
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_build_jobs_workspace_id ON build_jobs (workspace_id)"))

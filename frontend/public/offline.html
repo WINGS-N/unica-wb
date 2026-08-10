@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#000000" />
+    <title>UN1CA Build</title>
+    <link rel="icon" type="image/svg+xml" href="/appicon.svg" />
+    <style>
+      /* Shown without a network, so everything it needs is inline */
+      @font-face {
+        font-family: 'SamsungOne';
+        src: url('/fonts/samsungone_400.ttf') format('truetype');
+        font-weight: 400;
+      }
+      @font-face {
+        font-family: 'SamsungSharpSans';
+        src: url('/fonts/samsungsharpsans_bold.otf') format('opentype');
+        font-weight: 700;
+      }
+
+      :root {
+        color-scheme: dark;
+      }
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+      }
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+        background: #000;
+        color: #fbfbfb;
+        font-family: 'SamsungOne', 'Segoe UI', Roboto, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .card {
+        width: min(420px, 100%);
+        padding: 28px;
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 28px;
+        background: #1c1c1e;
+        box-shadow:
+          0 16px 60px rgba(0, 0, 0, 0.34),
+          inset 0 1px 0 rgba(255, 255, 255, 0.04);
+        text-align: center;
+      }
+      .icon {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto 18px;
+        border-radius: 20px;
+      }
+      h1 {
+        margin: 0;
+        font-family: 'SamsungSharpSans', 'SamsungOne', sans-serif;
+        font-size: 24px;
+        font-weight: 700;
+        letter-spacing: -0.005em;
+      }
+      p {
+        margin: 10px 0 0;
+        font-size: 14px;
+        line-height: 1.5;
+        color: rgba(252, 252, 252, 0.62);
+      }
+      button {
+        margin-top: 24px;
+        min-height: 44px;
+        padding: 0 22px;
+        border: none;
+        border-radius: 999px;
+        background: #1259d1;
+        color: #fff;
+        font: inherit;
+        font-size: 15px;
+        font-weight: 700;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #1063e6;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <img class="icon" src="/appicon.svg" alt="" />
+      <h1 data-i18n="title">No connection</h1>
+      <p data-i18n="text">The build interface cannot be reached. It will open as soon as the connection is back.</p>
+      <button type="button" onclick="location.reload()" data-i18n="retry">Retry</button>
+    </div>
+    <script>
+      // The app stores its language itself, so the stub speaks the same one
+      var STRINGS = {
+        ru: {
+          title: 'Нет соединения',
+          text: 'Интерфейс сборки недоступен. Он откроется, как только связь вернётся.',
+          retry: 'Повторить'
+        }
+      }
+      try {
+        var lang = localStorage.getItem('un1ca:lang')
+        var dict = STRINGS[lang]
+        if (dict) {
+          document.documentElement.lang = lang
+          document.querySelectorAll('[data-i18n]').forEach(function (node) {
+            var value = dict[node.getAttribute('data-i18n')]
+            if (value) node.textContent = value
+          })
+        }
+      } catch (e) {
+        // No storage access, English stays
+      }
+    </script>
+  </body>
+</html>

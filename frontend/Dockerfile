@@ -1,5 +1,8 @@
 FROM node:22-alpine AS build
 WORKDIR /app
+# The tag is not available inside the build context, so CI passes it in
+ARG APP_VERSION=""
+ENV APP_VERSION=$APP_VERSION
 COPY package.json /app/package.json
 RUN corepack enable && corepack prepare pnpm@10.6.2 --activate
 RUN pnpm install --no-frozen-lockfile

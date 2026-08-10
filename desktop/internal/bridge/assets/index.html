@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="en" data-unica-window="splash">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>UN1CA Build</title>
+  <style>
+    @font-face {
+      font-family: 'SamsungOne';
+      src: url('fonts/samsungone_400.ttf') format('truetype');
+      font-weight: 400;
+    }
+    @font-face {
+      font-family: 'SamsungOne';
+      src: url('fonts/samsungone_700.ttf') format('truetype');
+      font-weight: 700;
+    }
+    @font-face {
+      font-family: 'SamsungSharpSans';
+      src: url('fonts/samsungsharpsans_medium.otf') format('opentype');
+      font-weight: 500;
+    }
+    @font-face {
+      font-family: 'SamsungSharpSans';
+      src: url('fonts/samsungsharpsans_bold.otf') format('opentype');
+      font-weight: 700;
+    }
+
+    :root {
+      --page: transparent;
+      --card: #000000;
+      --raised: #1c1c1e;
+      --surface: #242427;
+      --text: #fbfbfb;
+      --muted: rgba(252, 252, 252, 0.62);
+      --kicker: rgba(252, 252, 252, 0.55);
+      --border: rgba(255, 255, 255, 0.06);
+      --divider: rgba(255, 255, 255, 0.08);
+      --accent: #1259d1;
+      --accent-hover: #1063e6;
+      --danger: #ff7a8c;
+      color-scheme: dark;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      height: 100%;
+      margin: 0;
+      background: transparent;
+      color: var(--text);
+      font-family: 'SamsungOne', 'Segoe UI', Roboto, sans-serif;
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    h1, h2, h3 { margin: 0; font-family: 'SamsungSharpSans', 'SamsungOne', sans-serif; letter-spacing: -0.005em; }
+
+    .shell { display: flex; height: 100%; padding: 26px; }
+
+    .card {
+      display: flex;
+      flex: 1;
+      flex-direction: column;
+      gap: 18px;
+      padding: 26px;
+      border: 1px solid var(--border);
+      border-radius: 26px;
+      background: var(--card);
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+    }
+
+    .kicker { font-size: 11px; font-weight: 700; letter-spacing: 0.14em; text-transform: uppercase; color: var(--kicker); }
+    .title { font-size: 26px; font-weight: 700; margin-top: 6px; }
+    .subtitle { margin-top: 6px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+
+    .status-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+    .status { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; }
+    .pct { flex: none; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+    .track { position: relative; height: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.1); overflow: hidden; }
+    .fill { height: 100%; width: 1%; border-radius: 999px; background: var(--accent); transition: width 240ms ease-out; }
+    .track.is-error .fill { background: var(--danger); }
+
+    .meta { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--muted); }
+
+    .logs {
+      flex: 1;
+      min-height: 0;
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.04);
+      color: rgba(252, 252, 252, 0.8);
+      font-family: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
+      font-size: 12px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      word-break: break-word;
+      scrollbar-width: none;
+    }
+    .logs::-webkit-scrollbar { width: 0; height: 0; }
+
+    .error {
+      display: none;
+      padding: 14px 16px;
+      border: 1px solid rgba(255, 122, 140, 0.35);
+      border-radius: 18px;
+      background: rgba(255, 122, 140, 0.07);
+      color: var(--danger);
+      font-size: 13px;
+      line-height: 1.5;
+      white-space: pre-wrap;
+      max-height: 34%;
+      overflow: auto;
+    }
+
+    .actions { display: none; justify-content: flex-end; gap: 10px; }
+
+    button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 0 22px;
+      border: none;
+      border-radius: 999px;
+      font: inherit;
+      font-size: 15px;
+      font-weight: 700;
+      color: var(--text);
+      background: rgba(255, 255, 255, 0.08);
+      cursor: pointer;
+      transition: background 150ms ease;
+    }
+    button:hover:not(:disabled) { background: rgba(255, 255, 255, 0.14); }
+    button:disabled { opacity: 0.45; cursor: default; }
+    button.primary { background: var(--accent); color: #fff; }
+    button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+
+    .backdrop {
+      position: fixed;
+      inset: 26px;
+      border-radius: 26px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      background: rgba(0, 0, 0, 0.7);
+      backdrop-filter: blur(4px);
+    }
+    .backdrop.show { display: flex; }
+
+    .modal {
+      width: min(420px, 100%);
+      padding: 26px;
+      border: 1px solid var(--border);
+      border-radius: 28px;
+      background: var(--raised);
+      box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+    }
+    .modal h3 { font-size: 19px; font-weight: 700; }
+    .modal p { margin: 10px 0 0; font-size: 14px; line-height: 1.5; color: var(--muted); }
+
+    .field { margin-top: 20px; display: flex; flex-direction: column; }
+    .field label { margin-bottom: 4px; font-size: 13px; color: var(--kicker); transition: color 150ms ease; }
+    .field:focus-within label { color: var(--accent); }
+    .field input {
+      width: 100%;
+      padding: 8px 0;
+      border: 0;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.32);
+      border-radius: 0;
+      background: transparent;
+      color: var(--text);
+      font: inherit;
+      font-size: 15px;
+      outline: none;
+      transition: border-color 150ms ease;
+    }
+    .field input:focus { border-bottom-color: var(--accent); }
+
+    .modal-actions { margin-top: 26px; display: flex; justify-content: flex-end; gap: 10px; }
+
+    /* Samsung four-dot loader, inline size: 6px dots with an 8px reach */
+    .loader-box { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; flex: none; }
+    .loader { position: relative; width: 6px; height: 6px; animation: loader-rotate 1.4s linear infinite; }
+    .loader span { position: absolute; top: 0; left: 0; width: 6px; height: 6px; border-radius: 999px; }
+    .loader .d1 { background: #3781f6; animation: loader-tl 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite; }
+    .loader .d2 { background: #61d299; animation: loader-tr 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite; }
+    .loader .d3 { background: #3781f6; animation: loader-br 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite; }
+    .loader .d4 { background: #3781f6; animation: loader-bl 1.4s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite; }
+
+    @keyframes loader-rotate { to { transform: rotate(360deg); } }
+    @keyframes loader-tl { 0%, 100% { transform: translate(-3.5px, -3.5px); opacity: 0.9; } 50% { transform: translate(-8px, -8px); opacity: 1; } }
+    @keyframes loader-tr { 0%, 100% { transform: translate(3.5px, -3.5px); opacity: 0.9; } 50% { transform: translate(8px, -8px); opacity: 1; } }
+    @keyframes loader-br { 0%, 100% { transform: translate(3.5px, 3.5px); opacity: 0.9; } 50% { transform: translate(8px, 8px); opacity: 1; } }
+    @keyframes loader-bl { 0%, 100% { transform: translate(-3.5px, 3.5px); opacity: 0.9; } 50% { transform: translate(-8px, 8px); opacity: 1; } }
+
+    .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="card">
+      <div class="head">
+        <div>
+          <p class="kicker" id="kicker" data-i18n="splashStarting">Starting</p>
+          <h1 class="title">UN1CA Build</h1>
+          <p class="subtitle" id="subtitle" data-i18n="splashSubtitleStarting">Starting services and checking runtime health</p>
+        </div>
+        <span class="loader-box" id="loader"><span class="loader"><span class="d1"></span><span class="d2"></span><span class="d3"></span><span class="d4"></span></span></span>
+      </div>
+
+      <div>
+        <div class="status-row">
+          <div class="status" id="status" data-i18n="splashStatusIdle">Starting...</div>
+          <div class="pct" id="pct">0%</div>
+        </div>
+        <div class="track" id="track"><div class="fill" id="fill"></div></div>
+        <div class="meta" id="meta"></div>
+      </div>
+
+      <pre class="logs" id="logs"></pre>
+
+      <div class="error" id="error"></div>
+      <div class="actions" id="actions">
+        <button id="fix" style="display:none;" data-i18n="fixRuntimeIssue">Fix runtime issue</button>
+        <button id="retry" class="primary" data-i18n="retryStartup">Retry startup</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="backdrop" id="sudoBackdrop">
+    <div class="modal">
+      <h3 id="sudoTitle" data-i18n="sudoTitle">Rootful Docker access</h3>
+      <p id="sudoText" data-i18n="sudoText">Enter your sudo password to continue startup</p>
+      <div class="field">
+        <label for="sudoInput" data-i18n="sudoPassword">Password</label>
+        <input id="sudoInput" type="password" autocomplete="current-password" />
+      </div>
+      <div class="modal-actions">
+        <button id="sudoCancel" data-i18n="cancel">Cancel</button>
+        <button id="sudoSubmit" class="primary" data-i18n="sudoContinue">Continue</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const el = (id) => document.getElementById(id)
+    const statusEl = el('status')
+    const kickerEl = el('kicker')
+    const subtitleEl = el('subtitle')
+    const pctEl = el('pct')
+    const fillEl = el('fill')
+    const trackEl = el('track')
+    const metaEl = el('meta')
+    const logsEl = el('logs')
+    const errorEl = el('error')
+    const actionsEl = el('actions')
+    const retryBtn = el('retry')
+    const fixBtn = el('fix')
+    const loaderEl = el('loader')
+    const sudoBackdrop = el('sudoBackdrop')
+    const sudoInput = el('sudoInput')
+
+    const STAGE_KEY = {
+      check: 'stageCheck',
+      seed: 'stageSeed',
+      pull: 'stagePull',
+      compose: 'stageCompose',
+      health: 'stageHealth',
+      shutdown: 'stageShutdown'
+    }
+
+    let UI = {}
+    let MESSAGES = {}
+
+    const ui = (key, fallback) => UI[key] || fallback || ''
+    // Progress text is produced in English, so it is translated by lookup
+    const msg = (text) => MESSAGES[text] || text
+
+    function applyCatalog(state) {
+      UI = state.ui || {}
+      MESSAGES = state.messages || {}
+      if (state.lang) document.documentElement.lang = state.lang
+      document.querySelectorAll('[data-i18n]').forEach((node) => {
+        const value = UI[node.dataset.i18n]
+        if (value) node.textContent = value
+      })
+    }
+
+    let currentFixKind = ''
+    let shown = 0
+    let target = 0
+    let raf = null
+
+    function animate() {
+      const diff = target - shown
+      shown = Math.abs(diff) < 0.2 ? target : shown + diff * 0.28
+      const value = Math.max(1, Math.min(100, shown))
+      fillEl.style.width = `${value}%`
+      pctEl.textContent = `${Math.round(value)}%`
+      raf = Math.abs(target - shown) >= 0.2 ? requestAnimationFrame(animate) : null
+    }
+
+    function setPercent(value) {
+      target = Math.max(1, Math.min(100, Number(value || 0)))
+      if (!raf) raf = requestAnimationFrame(animate)
+    }
+
+    function formatBytes(bytes) {
+      const value = Number(bytes || 0)
+      if (!value) return '0 B'
+      const units = ['B', 'KB', 'MB', 'GB', 'TB']
+      const idx = Math.min(Math.floor(Math.log(value) / Math.log(1024)), units.length - 1)
+      return `${(value / 1024 ** idx).toFixed(idx === 0 ? 0 : 1)} ${units[idx]}`
+    }
+
+    let lastLogged = ''
+    function appendLog(text) {
+      // A reconnect replays the current progress, which would repeat the line
+      if (text === lastLogged) return
+      lastLogged = text
+      const stamp = new Date().toLocaleTimeString()
+      const prev = logsEl.textContent ? `${logsEl.textContent}\n` : ''
+      logsEl.textContent = `${prev}[${stamp}] ${text}`.split('\n').slice(-200).join('\n')
+      logsEl.scrollTop = logsEl.scrollHeight
+    }
+
+    function applyProgress(payload) {
+      if (!payload) return
+      const shutdown = payload.stage === 'shutdown'
+      kickerEl.textContent = shutdown ? ui('splashStopping', 'Stopping') : ui('splashStarting', 'Starting')
+      subtitleEl.textContent = shutdown
+        ? ui('splashSubtitleStopping', 'Stopping services and cleaning up Docker resources')
+        : ui('splashSubtitleStarting', 'Starting services and checking runtime health')
+      const text = payload.message ? msg(payload.message) : ui('splashWorking', 'Working')
+      statusEl.textContent = text
+      statusEl.title = text
+
+      if (typeof payload.totalProgress === 'number') setPercent(payload.totalProgress)
+      const detail = payload.detail || ui(STAGE_KEY[payload.stage]) || ''
+
+      const parts = []
+      if (payload.total || payload.downloaded) {
+        parts.push(`${formatBytes(payload.downloaded)} / ${formatBytes(payload.total)}`)
+      }
+      if (payload.speed) parts.push(`${formatBytes(payload.speed)}/s`)
+      if (detail) parts.push(detail)
+      metaEl.textContent = parts.join('   -   ')
+
+      if (payload.message) appendLog(text)
+    }
+
+    function applyError(payload) {
+      errorEl.style.display = 'block'
+      errorEl.textContent = payload?.message || 'Startup failed'
+      actionsEl.style.display = 'flex'
+      trackEl.classList.add('is-error')
+      loaderEl.style.display = 'none'
+      currentFixKind = String(payload?.fixKind || '')
+      if (currentFixKind) {
+        fixBtn.style.display = 'inline-flex'
+        fixBtn.textContent = payload?.fixLabel || ui('fixRuntimeIssue', 'Fix runtime issue')
+      } else {
+        fixBtn.style.display = 'none'
+      }
+    }
+
+    function clearError() {
+      errorEl.style.display = 'none'
+      errorEl.textContent = ''
+      actionsEl.style.display = 'none'
+      trackEl.classList.remove('is-error')
+      loaderEl.style.display = 'inline-flex'
+    }
+
+    const source = new EventSource('/events')
+    source.addEventListener('progress', (event) => applyProgress(JSON.parse(event.data)))
+    source.addEventListener('error-event', (event) => applyError(JSON.parse(event.data)))
+    source.addEventListener('sudo-request', (event) => openSudo(JSON.parse(event.data)))
+
+    function openSudo(payload) {
+      if (!payload) return
+      el('sudoTitle').textContent = payload.title || ui('sudoTitle', 'Rootful Docker access')
+      el('sudoText').textContent = payload.message || ui('sudoText', 'Enter your sudo password to continue startup')
+      sudoInput.value = ''
+      sudoBackdrop.classList.add('show')
+      setTimeout(() => sudoInput.focus(), 10)
+    }
+
+    fetch('/state')
+      .then((r) => r.json())
+      .then((state) => {
+        if (Array.isArray(state?.logs) && state.logs.length) {
+          logsEl.textContent = state.logs.join('\n')
+          lastLogged = ''
+          logsEl.scrollTop = logsEl.scrollHeight
+        }
+        applyCatalog(state || {})
+        if (state?.progress) applyProgress(state.progress)
+        if (state?.failure) applyError(state.failure)
+        if (state?.sudo) openSudo(state.sudo)
+      })
+      .catch(() => {})
+
+    function closeSudo() {
+      sudoBackdrop.classList.remove('show')
+      sudoInput.value = ''
+    }
+
+    el('sudoSubmit').addEventListener('click', () => {
+      fetch('/action/sudo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: sudoInput.value || '' })
+      }).catch(() => {})
+      closeSudo()
+    })
+
+    el('sudoCancel').addEventListener('click', () => {
+      fetch('/action/sudo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cancel: true })
+      }).catch(() => {})
+      closeSudo()
+    })
+
+    sudoInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') el('sudoSubmit').click()
+      if (event.key === 'Escape') el('sudoCancel').click()
+    })
+
+    retryBtn.addEventListener('click', () => {
+      clearError()
+      appendLog('Retrying startup')
+      fetch('/action/retry', { method: 'POST' }).catch(() => {})
+    })
+
+    fixBtn.addEventListener('click', () => {
+      if (!currentFixKind) return
+      clearError()
+      appendLog(`Applying fix: ${currentFixKind}`)
+      fetch(`/action/fix?kind=${encodeURIComponent(currentFixKind)}`, { method: 'POST' }).catch(() => {})
+    })
+  </script>
+</body>
+</html>

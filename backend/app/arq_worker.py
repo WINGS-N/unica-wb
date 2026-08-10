@@ -13,6 +13,7 @@ from .tasks import (
     run_repo_pull_job,
     run_repo_submodules_job,
     run_stop_job_task,
+    run_workspace_delete_job,
 )
 
 
@@ -34,6 +35,8 @@ def _redis_settings() -> RedisSettings:
         password=parsed.password,
         ssl=parsed.scheme == "rediss",
     )
+
+
 async def build_job_task(_ctx, job_id: str):
     await asyncio.to_thread(run_build_job, job_id)
 
@@ -46,20 +49,24 @@ async def delete_fw_job_task(_ctx, job_id: str, fw_type: str, fw_key: str):
     await asyncio.to_thread(run_delete_samsung_fw_job, job_id, fw_type, fw_key)
 
 
-async def repo_clone_job_task(_ctx, job_id: str, git_url: str, git_ref: str, git_username: str, git_token: str):
-    await asyncio.to_thread(run_repo_clone_job, job_id, git_url, git_ref, git_username, git_token)
+async def repo_clone_job_task(_ctx, job_id: str, fresh: bool = False):
+    await asyncio.to_thread(run_repo_clone_job, job_id, fresh)
 
 
-async def repo_pull_job_task(_ctx, job_id: str, git_ref: str, git_url: str, git_username: str, git_token: str):
-    await asyncio.to_thread(run_repo_pull_job, job_id, git_ref, git_url, git_username, git_token)
+async def repo_pull_job_task(_ctx, job_id: str):
+    await asyncio.to_thread(run_repo_pull_job, job_id)
 
 
-async def repo_submodules_job_task(_ctx, job_id: str, git_url: str, git_username: str, git_token: str):
-    await asyncio.to_thread(run_repo_submodules_job, job_id, git_url, git_username, git_token)
+async def repo_submodules_job_task(_ctx, job_id: str):
+    await asyncio.to_thread(run_repo_submodules_job, job_id)
 
 
 async def repo_delete_job_task(_ctx, job_id: str, mode: str):
     await asyncio.to_thread(run_repo_delete_job, job_id, mode)
+
+
+async def workspace_delete_job_task(_ctx, job_id: str, target_workspace_id: str, delete_files: bool):
+    await asyncio.to_thread(run_workspace_delete_job, job_id, target_workspace_id, delete_files)
 
 
 async def stop_job_task(_ctx, job_id: str, signal_type: str):
@@ -75,6 +82,7 @@ class WorkerSettingsBuilds:
         repo_pull_job_task,
         repo_submodules_job_task,
         repo_delete_job_task,
+        workspace_delete_job_task,
     ]
     redis_settings = _redis_settings()
     queue_name = ARQ_QUEUE_BUILDS

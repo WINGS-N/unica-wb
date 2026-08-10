@@ -1,0 +1,25 @@
+{
+  "name": "UN1CA Build",
+  "short_name": "UN1CA",
+  "description": "Build interface for UN1CA firmware",
+  "id": "/",
+  "start_url": "/build",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#000000",
+  "theme_color": "#000000",
+  "lang": "en",
+  "categories": ["developer", "utilities"],
+  "icons": [
+    { "src": "/appicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Jobs", "url": "/jobs" },
+    { "name": "Logs", "url": "/logs" },
+    { "name": "Firmware", "url": "/firmware" }
+  ]
+}

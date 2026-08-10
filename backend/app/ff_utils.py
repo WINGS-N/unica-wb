@@ -40,9 +40,8 @@ def write_floating_feature_xml(path: Path, entries: OrderedDict[str, str]):
             continue
         el = ET.SubElement(root, key)
         el.text = value
-    xml = ET.tostring(root, encoding="unicode")
-    # Simple formatting to keep output readable.
-    lines = ["<?xml  version=\"1.0\" encoding=\"UTF-8\" ?>", "<SecFloatingFeatureSet>"]
+    # Simple formatting to keep output readable
+    lines = ['<?xml  version="1.0" encoding="UTF-8" ?>', "<SecFloatingFeatureSet>"]
     for key, value in entries.items():
         lines.append(f"    <{key}>{value}</{key}>")
     lines.append("</SecFloatingFeatureSet>")
@@ -61,7 +60,7 @@ def parse_shell_assignments(path: Path) -> OrderedDict[str, str]:
         if not match:
             continue
         key, value = match.groups()
-        value = value.strip().strip("\"").strip("'")
+        value = value.strip().strip('"').strip("'")
         entries[key] = value
     return entries
 
@@ -113,7 +112,7 @@ def parse_fallback_overrides(customize_path: Path, variables: dict[str, str]) ->
         if not match:
             continue
         key, value = match.groups()
-        value = value.strip().strip("\"").strip("'")
+        value = value.strip().strip('"').strip("'")
         entries[key] = _expand_fallback_value(value, variables)
     return entries
 
@@ -167,7 +166,7 @@ def parse_shell_vars(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key = key.strip()
-        value = value.strip().strip("\"").strip("'")
+        value = value.strip().strip('"').strip("'")
         if key:
             out[key] = value
     return out
