@@ -84,6 +84,7 @@ jobs:
           retention-days: 1
 
   build-docker-images:
+    name: ${{ matrix.image }}
     runs-on: ubuntu-22.04
     needs: prep
     strategy:
@@ -134,6 +135,7 @@ jobs:
           cache-to: type=gha,scope=${{ matrix.image }},mode=max
 
   build-desktop:
+    name: desktop ${{ matrix.arch }}
     needs:
       - prep
       - frontend
