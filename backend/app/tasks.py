@@ -182,6 +182,15 @@ _RE_EXTRACT_STEP = re.compile(
 _RE_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^/\s@]+)@")
 
 
+# Build scripts colour their output, and those codes are meaningless once the
+# text is a progress message rather than a terminal line
+_RE_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
+
+
+def _strip_ansi(text: str) -> str:
+    return _RE_ANSI.sub("", str(text))
+
+
 def _sh_dq(value: str) -> str:
     # Value goes inside a double quoted shell assignment written by sed
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"').replace("|", "\\|") + '"'
@@ -472,7 +481,7 @@ class _FirmwareProgressTracker:
         if self.done:
             return
         for part in re.split(r"[\r\n]+", text):
-            line = part.strip()
+            line = _strip_ansi(part).strip()
             if not line:
                 continue
             if _RE_VERIFY_LINE.search(line):
@@ -1444,7 +1453,7 @@ def run_build_job(job_id: str):
                     lf.flush()
                     tracker.feed(chunk)
                     for line in re.split(r"[\r\n]+", chunk):
-                        text = line.strip()
+                        text = _strip_ansi(line).strip()
                         if not text:
                             continue
                         for stage, pct, pattern in _BUILD_STAGE_RULES:
