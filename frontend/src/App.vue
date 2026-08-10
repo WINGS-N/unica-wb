@@ -1,5 +1,6 @@
 <script setup>
 import { haptic } from './stores/haptics.js'
+import { checkForUpdate } from './stores/pwa.js'
 import { computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import { Hammer, HardDrive, ListTodo, ScrollText, Settings } from 'lucide-vue-next'
@@ -43,6 +44,7 @@ onBeforeUnmount(() => {
 
 function onTab(id) {
   haptic('select')
+  checkForUpdate()
   goTab(id)
 }
 </script>

@@ -149,6 +149,22 @@ export function notifyIfUpdated() {
   }
 }
 
+let lastUpdateCheck = 0
+const UPDATE_CHECK_INTERVAL_MS = 60000
+
+export function checkForUpdate() {
+  if (!isSupported() || BUILD === 'dev') return
+  const now = Date.now()
+  if (now - lastUpdateCheck < UPDATE_CHECK_INTERVAL_MS) return
+  lastUpdateCheck = now
+  navigator.serviceWorker
+    .getRegistration()
+    .then((registration) => registration?.update())
+    .catch(() => {
+      // The next switch tries again
+    })
+}
+
 export function bootServiceWorker({ enabled = true } = {}) {
   if (!isSupported()) return
   if (!enabled || BUILD === 'dev') {
