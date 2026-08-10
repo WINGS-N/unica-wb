@@ -1115,21 +1115,39 @@ export async function openIncrementalModal(job) {
   }
 }
 
-export async function deleteArtifact(job, kind = 'rom') {
-  const ok = await confirm({
-    title: t('deleteArtifactTitle'),
-    message: kind === 'target_files' ? t('deleteTargetFilesMessage') : t('deleteArtifactMessage'),
-    confirmText: t('delete'),
-    danger: true
-  })
-  if (!ok) return
+export const deleteArtifactJob = ref(null)
+export const deleteArtifactPick = ref({ rom: true, targetFiles: false })
+export const deleteArtifactBusy = ref(false)
+
+export function openDeleteArtifactModal(row) {
+  const hasRom = Boolean(row.artifact_path || row.exists)
+  const hasTargetFiles = Boolean(row.target_files_path || row.target_files_exists)
+  deleteArtifactJob.value = {
+    id: row.id || row.job_id,
+    hasRom,
+    hasTargetFiles,
+    romSize: row.size_bytes || 0,
+    targetFilesSize: row.target_files_size || 0
+  }
+  deleteArtifactPick.value = { rom: hasRom, targetFiles: !hasRom && hasTargetFiles }
+}
+
+export async function deleteArtifactConfirmed() {
+  const row = deleteArtifactJob.value
+  const pick = deleteArtifactPick.value
+  if (!row || (!pick.rom && !pick.targetFiles)) return
+  const kind = pick.rom && pick.targetFiles ? 'both' : pick.rom ? 'rom' : 'target_files'
+  deleteArtifactBusy.value = true
   try {
-    await apiFetch(`/jobs/${job.id ?? job.job_id}/artifact`, { method: 'DELETE', params: { kind } })
+    await apiFetch(`/jobs/${row.id}/artifact`, { method: 'DELETE', params: { kind } })
+    deleteArtifactJob.value = null
     showToast(t('artifactDeleted'), 'success')
     await Promise.all([fetchJobs(), fetchArtifacts()])
     if (incrementalForJob.value) await openIncrementalModal(incrementalForJob.value)
   } catch (e) {
     reportError('artifactDeleteFailed', e)
+  } finally {
+    deleteArtifactBusy.value = false
   }
 }
 

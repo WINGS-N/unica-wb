@@ -395,9 +395,10 @@
   "failedIncremental": "Не удалось собрать инкрементальный зип",
   "noIncrementalBases": "Нет ранней сборки с архивом target-files",
   "deleteArtifactTitle": "Удалить артефакт",
-  "deleteArtifactMessage": "Прошивочный зип будет удалён с диска",
-  "deleteTargetFilesMessage": "Архив target-files будет удалён с диска, инкрементальные обновления относительно этой сборки станут невозможны",
+  "deleteArtifactMessage": "Выберите, что удалить с диска",
+  "deleteTargetFilesMessage": "Без архива инкрементальные обновления относительно этой сборки станут невозможны",
   "artifactDeleted": "Артефакт удалён",
   "artifactDeleteFailed": "Не удалось удалить артефакт",
-  "deleteTargetFiles": "Удалить target-files"
+  "flashableZip": "Прошивочный зип",
+  "targetFilesArchive": "Архив target-files"
 }

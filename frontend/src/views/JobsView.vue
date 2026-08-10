@@ -10,7 +10,7 @@ import { downloadUrl } from '../stores/api.js'
 import { goTab, openOverlay } from '../stores/nav.js'
 import {
   buildProgress,
-  deleteArtifact,
+  openDeleteArtifactModal,
   filteredJobs,
   formatDateTime,
   hasJobDebloatChanges,
@@ -124,16 +124,13 @@ function openJobMods(job) {
           <a v-if="job.artifact_path" class="chip-button" :href="downloadUrl(`/jobs/${job.id}/artifact`)" @click.stop>
             <Download :size="14" /> {{ t('downloadZip') }}
           </a>
-          <button v-if="job.artifact_path" type="button" class="chip-button" @click.stop="deleteArtifact(job, 'rom')">
-            <Trash2 :size="14" /> {{ t('delete') }}
-          </button>
           <button
-            v-if="job.target_files_path"
+            v-if="job.artifact_path || job.target_files_path"
             type="button"
             class="chip-button"
-            @click.stop="deleteArtifact(job, 'target_files')"
+            @click.stop="openDeleteArtifactModal(job)"
           >
-            <Trash2 :size="14" /> {{ t('deleteTargetFiles') }}
+            <Trash2 :size="14" /> {{ t('delete') }}
           </button>
           <button
             v-if="job.status === 'succeeded' && job.target_files_path"

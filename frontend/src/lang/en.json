@@ -395,9 +395,10 @@
   "failedIncremental": "Incremental zip failed",
   "noIncrementalBases": "No earlier build with a target-files archive",
   "deleteArtifactTitle": "Delete artifact",
-  "deleteArtifactMessage": "The flashable zip will be removed from disk",
-  "deleteTargetFilesMessage": "The target-files archive will be removed from disk, and incremental updates against this build become impossible",
+  "deleteArtifactMessage": "Pick what to remove from disk",
+  "deleteTargetFilesMessage": "Without the archive, incremental updates against this build become impossible",
   "artifactDeleted": "Artifact deleted",
   "artifactDeleteFailed": "Failed to delete the artifact",
-  "deleteTargetFiles": "Delete target-files"
+  "flashableZip": "Flashable zip",
+  "targetFilesArchive": "target-files archive"
 }

@@ -9,10 +9,10 @@ import { downloadUrl } from '../stores/api.js'
 import {
   artifacts,
   artifactsLoading,
-  deleteArtifact,
   fetchArtifacts,
   formatBytes,
   formatDateTime,
+  openDeleteArtifactModal,
   openIncrementalModal,
   target
 } from '../stores/app.js'
@@ -55,16 +55,13 @@ onMounted(fetchArtifacts)
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
           </button>
-          <button v-if="item.exists" type="button" class="chip-button" @click="deleteArtifact(item, 'rom')">
-            <Trash2 :size="14" /> {{ t('delete') }}
-          </button>
           <button
-            v-if="item.target_files_exists"
+            v-if="item.exists || item.target_files_exists"
             type="button"
             class="chip-button"
-            @click="deleteArtifact(item, 'target_files')"
+            @click="openDeleteArtifactModal(item)"
           >
-            <Trash2 :size="14" /> {{ t('deleteTargetFiles') }}
+            <Trash2 :size="14" /> {{ t('delete') }}
           </button>
         </div>
       </article>
