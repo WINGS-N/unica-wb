@@ -128,4 +128,8 @@ jobs:
         run: docker compose -f docker-compose.yml config --quiet
 
       - name: Validate the local-repo overlay
+        # The overlay binds a checkout from the host, which only exists on a
+        # real machine
+        env:
+          LOCAL_UN1CA_PATH: /tmp/un1ca
         run: docker compose -f docker-compose.yml -f docker-compose.local-repo.yml config --quiet
