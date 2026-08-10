@@ -52,6 +52,7 @@ class BuildJob(Base):
     build_signature: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     force: Mapped[bool] = mapped_column(Boolean, default=False)
     no_rom_zip: Mapped[bool] = mapped_column(Boolean, default=False)
+    skip_target_files: Mapped[bool] = mapped_column(Boolean, default=False)
     job_kind: Mapped[str] = mapped_column(String(32), default="build", index=True)
     operation_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

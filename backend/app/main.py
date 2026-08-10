@@ -1603,6 +1603,7 @@ def _create_operation_job(db: Session, *, workspace_id: str, target: str, operat
         source_commit="unknown",
         force=False,
         no_rom_zip=False,
+        skip_target_files=False,
         status="queued",
     )
     db.add(job)
@@ -1740,6 +1741,7 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
                 build_signature=build_signature,
                 force=payload.force,
                 no_rom_zip=payload.no_rom_zip,
+                skip_target_files=payload.skip_target_files,
                 status="reused",
                 return_code=0,
                 artifact_path=existing.artifact_path,

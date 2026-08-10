@@ -19,6 +19,7 @@ class BuildJobCreate(BaseModel):
     ff_overrides: dict[str, str | bool] | None = None
     force: bool = False
     no_rom_zip: bool = False
+    skip_target_files: bool = False
 
 
 class BuildJobRead(BaseModel):
@@ -37,6 +38,7 @@ class BuildJobRead(BaseModel):
     build_signature: str | None
     force: bool
     no_rom_zip: bool
+    skip_target_files: bool
     status: str
     queue_job_id: str | None
     return_code: int | None

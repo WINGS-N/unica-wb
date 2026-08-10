@@ -385,5 +385,7 @@
   "hapticsTitle": "Haptics",
   "hapticsHint": "Vibration feedback on touch",
   "hapticsToggle": "Vibration feedback",
-  "hapticsToggleHint": "Short response to taps, switches and results"
+  "hapticsToggleHint": "Short response to taps, switches and results",
+  "skipTargetFiles": "Skip packaging",
+  "skipTargetFilesHint": "Build only, produce no zips at all"
 }

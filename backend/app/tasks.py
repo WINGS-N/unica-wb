@@ -1294,8 +1294,11 @@ def run_build_job(job_id: str):
             flags.append("--force")
         # The build script makes the target-files zip by default and the flashable
         # one only when asked, so wanting a rom means passing a flag rather than
-        # withholding one
-        if not job.no_rom_zip:
+        # withholding one. Skipping target files drops both, which is why the two
+        # options cannot be combined
+        if job.skip_target_files:
+            flags.append("--no-target-files")
+        elif not job.no_rom_zip:
             flags.append("--build-rom-zip")
 
         short_commit = (job.source_commit or "unknown")[:8]

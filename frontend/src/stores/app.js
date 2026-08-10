@@ -44,6 +44,7 @@ export const versionPatch = ref(0)
 export const versionSuffix = ref('')
 export const force = ref(false)
 export const noRomZip = ref(false)
+export const skipTargetFiles = ref(false)
 
 export const jobs = ref([])
 export const jobsLoading = ref(false)
@@ -698,7 +699,8 @@ export async function submitJob() {
         debloat_add_product: pathsTextToList(debloatAddProductText.value),
         ff_overrides: ffOverridesCount.value ? ffOverrides.value : null,
         force: force.value,
-        no_rom_zip: noRomZip.value
+        no_rom_zip: noRomZip.value,
+        skip_target_files: skipTargetFiles.value
       }
     })
     selectedJob.value = job

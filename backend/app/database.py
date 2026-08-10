@@ -41,6 +41,8 @@ def run_migrations():
     statements = []
     if "source_commit" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN source_commit VARCHAR(64) DEFAULT 'unknown'")
+    if "skip_target_files" not in cols:
+        statements.append("ALTER TABLE build_jobs ADD COLUMN skip_target_files BOOLEAN DEFAULT 0")
     if "reused_from_job_id" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN reused_from_job_id VARCHAR(36)")
     if "source_firmware" not in cols:

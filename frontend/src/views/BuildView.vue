@@ -48,6 +48,7 @@ import {
   loading,
   modsDisabledIds,
   noRomZip,
+  skipTargetFiles,
   normalizeModelForImage,
   openStopModalForProgress,
   repoSyncText,
@@ -248,7 +249,16 @@ function latestZipHref() {
               <p class="form-label">{{ t('skipRomZip') }}</p>
               <p class="form-hint">{{ t('skipRomZipHint') }}</p>
             </div>
-            <OneuiSwitch v-model="noRomZip" />
+            <OneuiSwitch v-model="noRomZip" :disabled="skipTargetFiles" />
+          </div>
+        </div>
+        <div class="form-section">
+          <div class="form-row">
+            <div class="min-w-0">
+              <p class="form-label">{{ t('skipTargetFiles') }}</p>
+              <p class="form-hint">{{ t('skipTargetFilesHint') }}</p>
+            </div>
+            <OneuiSwitch v-model="skipTargetFiles" />
           </div>
         </div>
       </div>
