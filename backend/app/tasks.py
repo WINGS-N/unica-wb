@@ -150,6 +150,16 @@ _RE_GIT_PHASE_PERCENT = re.compile(r"(?<![\d.])(\d{1,3})%")
 _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/s", re.IGNORECASE)
 
 
+# Credentials are injected into the git command line, and any text carrying that
+# command must never leave this process with them intact: job errors are shown
+# in the interface and stored in the database
+_RE_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^/\s@]+)@")
+
+
+def _redact(text: str) -> str:
+    return _RE_URL_CREDENTIALS.sub(r"\1:***@", str(text))
+
+
 def _guess_fw_key(text: str, known_keys: list[str]) -> str:
     # Pull the fw_key out of the current log line so progress lands on the right card
     if not text:
@@ -489,7 +499,7 @@ def _run_operation_job(job_id: str, operation):
         job = db.get(BuildJob, job_id)
         if job:
             job.status = "failed"
-            job.error = str(exc)
+            job.error = _redact(exc)
             job.return_code = 1
             job.finished_at = _now()
             db.commit()
@@ -1346,7 +1356,7 @@ def run_build_job(job_id: str):
             db.refresh(job)
             if job.status != "canceled":
                 job.status = "failed"
-                job.error = str(exc)
+                job.error = _redact(exc)
             job.finished_at = _now()
             job.process_pid = None
             db.commit()
