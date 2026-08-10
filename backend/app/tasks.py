@@ -371,7 +371,9 @@ class _FirmwareProgressTracker:
             if not line:
                 continue
             guessed = _guess_fw_key(line, self.known_keys)
-            if guessed:
+            # A job knows which firmwares it touches, so a model named in passing
+            # by the environment banner must not steal the bar
+            if guessed and (not self.known_keys or guessed in self.known_keys):
                 self.current_key = guessed
             progress = _parse_progress(line)
             key = self.current_key or (self.known_keys[0] if len(self.known_keys) == 1 else "")
