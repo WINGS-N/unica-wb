@@ -156,6 +156,13 @@ _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/s", re.IGNORECASE)
 # in the interface and stored in the database
 _RE_EXTRACT_LINE = re.compile(r"^\s*-?\s*Extracting\b", re.IGNORECASE)
 
+# Extraction reports named steps and no numbers at all, so the only honest thing
+# to show is which step is running
+_RE_EXTRACT_STEP = re.compile(
+    r"^\s*-\s*(Extracting|Decompressing|Unsparsing|Converting|Mounting|Copying)\s+(?P<what>.+?)\.*\s*$",
+    re.IGNORECASE,
+)
+
 _RE_URL_CREDENTIALS = re.compile(r"(?<=://)([^/\s:@]+):([^/\s@]+)@")
 
 
@@ -376,6 +383,7 @@ class _FirmwareProgressTracker:
         self._last_emit: dict[str, tuple[int, float]] = {}
         self._started_at: dict[str, float] = {}
         self.phase = phase
+        self.step = ""
 
     def feed(self, text: str):
         # Fed with raw stdout/stderr chunks; the split on \r and \n happens here
@@ -385,6 +393,10 @@ class _FirmwareProgressTracker:
                 continue
             if _RE_EXTRACT_LINE.search(line):
                 self.phase = "extract"
+            step = _RE_EXTRACT_STEP.match(line)
+            if step:
+                self.step = f"{step.group(1).capitalize()} {step.group('what')}"
+                self.heartbeat()
             guessed = _guess_fw_key(line, self.known_keys)
             # A job knows which firmwares it touches, so a model named in passing
             # by the environment banner must not steal the bar
@@ -433,6 +445,7 @@ class _FirmwareProgressTracker:
                     "job_id": self.job_id,
                     "percent": max(0, last_pct),
                     "indeterminate": last_pct <= 0,
+                    "message": self.step,
                     "elapsed_sec": int(now - self._started_at[key]),
                 },
             )
