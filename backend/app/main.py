@@ -2329,6 +2329,38 @@ async def delete_samsung_fw_entry(
     return op_job
 
 
+@app.post(f"{settings.api_prefix}/firmware/download", response_model=BuildJobRead)
+async def download_samsung_fw(
+    target: str | None = None,
+    kind: str = "both",
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    # Downloading ahead of a build: the firmware is the slow part of a first run
+    if kind not in ("source", "target", "both"):
+        raise HTTPException(400, "kind must be source, target or both")
+
+    ws = _require_ws(db, workspace)
+    targets = _get_targets(ws)
+    selected_target = target or ("b0s" if "b0s" in targets else (targets[0] if targets else ""))
+    if not selected_target:
+        raise HTTPException(400, "No targets available")
+    if selected_target not in targets:
+        raise HTTPException(400, "Unknown target")
+
+    labels = {"source": "source FW", "target": "target FW", "both": "source and target FW"}
+    op_job = _create_operation_job(
+        db,
+        workspace_id=ws.id,
+        target=selected_target,
+        operation_name=f"Download {labels[kind]}: {selected_target}",
+    )
+    op_job.queue_job_id = await _enqueue_build("download_fw_job_task", op_job.id, selected_target, kind)
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
 @app.post(f"{settings.api_prefix}/firmware/samsung/{{fw_key}}/extract", response_model=BuildJobRead)
 async def extract_samsung_fw(
     fw_key: str,

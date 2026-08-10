@@ -365,5 +365,8 @@
   "pushUnsupported": "This browser does not support push notifications",
   "pushIosHint": "On iOS notifications work only after the app is added to the home screen",
   "pushTest": "Send a test",
-  "updateDone": "App updated to"
+  "updateDone": "App updated to",
+  "downloadFw": "Download",
+  "downloadQueued": "Firmware download queued",
+  "failedFirmwareDownload": "Firmware download failed"
 }

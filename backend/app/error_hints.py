@@ -9,6 +9,18 @@ _HINTS = [
         "Run with privileged/rootful docker or enable loop devices in container runtime",
     ),
     (
+        "submodule-shallow-sha",
+        re.compile(
+            r"did not contain [0-9a-f]{40}|Direct fetching of that commit failed|expected 'acknowledgments'",
+            re.IGNORECASE,
+        ),
+        "Submodule pin is outside the shallow clone",
+        "The nested module is marked shallow, so only the branch tip is fetched, and the "
+        "pinned commit is not in it. Serving an arbitrary commit is off by default, so the "
+        "fallback request is refused",
+        "Update submodules without the shallow hint: git submodule update --init --recursive --no-recommend-shallow",
+    ),
+    (
         "git-identity",
         re.compile(r"Committer identity unknown|unable to auto-detect email address", re.IGNORECASE),
         "Git identity is not configured",

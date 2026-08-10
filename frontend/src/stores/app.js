@@ -1016,6 +1016,25 @@ export async function fetchSamsungFw() {
   }
 }
 
+export const firmwareDownloadBusyKind = ref('')
+
+/** Fetch a firmware ahead of a build: on a first run it is the slow part */
+export async function downloadSamsungFw(kind = 'both') {
+  firmwareDownloadBusyKind.value = kind
+  try {
+    await apiFetch('/firmware/download', {
+      method: 'POST',
+      params: { target: target.value, kind }
+    })
+    await Promise.all([fetchSamsungFw(), fetchJobs()])
+    showToast(t('downloadQueued'), 'warning')
+  } catch (e) {
+    reportError('failedFirmwareDownload', e)
+  } finally {
+    firmwareDownloadBusyKind.value = ''
+  }
+}
+
 export async function extractSamsungFwEntry(fwKey) {
   firmwareExtractBusyKey.value = fwKey
   try {

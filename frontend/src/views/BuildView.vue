@@ -31,12 +31,14 @@ import {
   debloatAddedCount,
   debloatDisabledIds,
   defaultsLoading,
+  firmwareDownloadBusyKind,
   firmwareStatusLoading,
   repoInfoLoading,
   targetsLoading,
   deviceImageSvgData,
   ffOverridesCount,
   firmwareProgressForStatus,
+  downloadSamsungFw,
   firmwareStatus,
   firmwareStatusTone,
   force,
@@ -118,15 +120,17 @@ function latestZipHref() {
 
     <!-- Firmware + repo state, the three things that decide whether a build can run -->
     <div class="grid gap-4 md:grid-cols-2">
-      <button
+      <div
         v-for="card in [
           { key: 'source', label: t('sourceFirmwareStatus'), status: firmwareStatus },
           { key: 'target', label: t('targetFirmwareStatus'), status: targetFirmwareStatus }
         ]"
         :key="card.key"
-        type="button"
-        class="surface-card flex items-start gap-4 text-left transition-colors hover:bg-white/[0.03]"
+        role="button"
+        tabindex="0"
+        class="surface-card flex cursor-pointer items-start gap-4 text-left transition-colors hover:bg-white/[0.03]"
         @click="goTab('firmware')"
+        @keydown.enter="goTab('firmware')"
       >
         <img
           :src="`/devices/${normalizeModelForImage(card.status.source_model)}.png`"
@@ -154,6 +158,15 @@ function latestZipHref() {
           <p class="muted truncate">
             {{ t('downloadedVersion') }}: {{ card.status.downloaded_version || card.status.extracted_version || 'n/a' }}
           </p>
+          <div v-if="!firmwareStatusLoading && !card.status.up_to_date" class="mt-2 flex justify-end">
+            <SamsungButton
+              small
+              :loading="firmwareDownloadBusyKind === card.key"
+              @click.stop="downloadSamsungFw(card.key)"
+            >
+              <Download :size="14" /> {{ t('downloadFw') }}
+            </SamsungButton>
+          </div>
           <ProgressBar
             v-if="firmwareProgressForStatus(card.status)"
             class="mt-3"
@@ -167,7 +180,7 @@ function latestZipHref() {
             @stop="openStopModalForProgress"
           />
         </div>
-      </button>
+      </div>
     </div>
 
     <button

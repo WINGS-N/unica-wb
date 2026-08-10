@@ -566,6 +566,71 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
     _run_operation_job(job_id, _op)
 
 
+def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str):
+    # Downloading is its own operation so a firmware can be fetched ahead of a
+    # build, which is the slow part of a first run
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        flags = []
+        if kind == "source":
+            flags.append("--ignore-target")
+        elif kind == "target":
+            flags.append("--ignore-source")
+        cmd = (
+            f"cd {shlex.quote(str(ctx.root))} && "
+            f"source buildenv.sh {shlex.quote(target_codename)} && "
+            f"scripts/download_fw.sh {' '.join(flags)}"
+        ).strip()
+        odin_dir = ctx.out / "odin"
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, [], phase="download")
+        tracker.heartbeat()
+        with log_file.open("ab") as lf:
+            lf.write(f"[download] target={target_codename} kind={kind}\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+            _set_job_pid(job_id, proc.pid)
+            assert proc.stdout
+            ok = False
+            canceled = False
+            try:
+                last_heartbeat = 0.0
+                while True:
+                    chunk = proc.stdout.read(4096)
+                    if chunk == "":
+                        break
+                    lf.write(chunk.encode("utf-8", errors="ignore"))
+                    lf.flush()
+                    tracker.feed(chunk)
+                    now = time.time()
+                    if now - last_heartbeat >= 1.0:
+                        tracker.heartbeat()
+                        last_heartbeat = now
+                rc = proc.wait()
+                db = SessionLocal()
+                try:
+                    canceled = _job_status(db, job_id) == "canceled"
+                finally:
+                    db.close()
+                if rc != 0 and not canceled:
+                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+                ok = rc == 0
+            finally:
+                _set_job_pid(job_id, None)
+                tracker.finalize(ok, status="canceled" if canceled else None)
+                _invalidate_dir_size_cache_paths([odin_dir, ctx.out / "fw"])
+
+    _run_operation_job(job_id, _op)
+
+
 def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
     # Delete cached Odin/FW entry from out tree
     def _delete(log_file: Path, ctx: ws_lib.WorkspaceRef):
@@ -647,7 +712,7 @@ def _checkout_cmd(root: Path, git_cfg: str, git_ref: str) -> str:
         f"if {git_cfg} -c safe.directory=* rev-parse --verify origin/{shlex.quote(git_ref)} >/dev/null 2>&1; then "
         f"{git_cfg} -c safe.directory=* reset --hard origin/{shlex.quote(git_ref)}; fi && "
         f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
-        f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
+        f"{git_cfg} -c safe.directory=* submodule update --init --recursive --no-recommend-shallow --jobs 8"
     )
 
 
@@ -839,7 +904,7 @@ def run_repo_submodules_job(job_id: str):
         cmd = (
             f"cd {shlex.quote(str(ctx.root))} && "
             f"{git_cfg} -c safe.directory=* submodule sync --recursive && "
-            f"{git_cfg} -c safe.directory=* submodule update --init --recursive --jobs 8"
+            f"{git_cfg} -c safe.directory=* submodule update --init --recursive --no-recommend-shallow --jobs 8"
         )
         tracker = _GitProgressTracker(ctx.id, "submodules", "Update submodules")
         rc = _stream_command_with_progress(

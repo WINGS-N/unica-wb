@@ -7,6 +7,7 @@ from .queue import ARQ_QUEUE_BUILDS, ARQ_QUEUE_CONTROLS
 from .tasks import (
     run_build_job,
     run_delete_samsung_fw_job,
+    run_download_samsung_fw_job,
     run_extract_samsung_fw_job,
     run_repo_clone_job,
     run_repo_delete_job,
@@ -45,6 +46,10 @@ async def extract_fw_job_task(_ctx, job_id: str, fw_key: str, target_codename: s
     await asyncio.to_thread(run_extract_samsung_fw_job, job_id, fw_key, target_codename)
 
 
+async def download_fw_job_task(_ctx, job_id: str, target_codename: str, kind: str):
+    await asyncio.to_thread(run_download_samsung_fw_job, job_id, target_codename, kind)
+
+
 async def delete_fw_job_task(_ctx, job_id: str, fw_type: str, fw_key: str):
     await asyncio.to_thread(run_delete_samsung_fw_job, job_id, fw_type, fw_key)
 
@@ -76,6 +81,7 @@ async def stop_job_task(_ctx, job_id: str, signal_type: str):
 class WorkerSettingsBuilds:
     functions = [
         build_job_task,
+        download_fw_job_task,
         extract_fw_job_task,
         delete_fw_job_task,
         repo_clone_job_task,
