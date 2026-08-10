@@ -54,7 +54,7 @@ onMounted(fetchSamsungFw)
       <div class="keyvals mt-3">
         <div class="keyval">
           <span class="keyval-label">{{ t('cacheLocation') }}</span>
-          <span class="keyval-value mono">{{ activeWorkspace?.out_path || 'n/a' }}</span>
+          <span class="keyval-value mono wrap-anywhere">{{ activeWorkspace?.out_path || 'n/a' }}</span>
         </div>
       </div>
     </div>
@@ -85,7 +85,7 @@ onMounted(fetchSamsungFw)
                 t('updateAvailable')
               }}</StatusPill>
             </div>
-            <p class="muted mt-1">{{ t('latestVersion') }}: {{ item.latest_version || 'n/a' }}</p>
+            <p class="muted wrap-anywhere mt-1">{{ t('latestVersion') }}: {{ item.latest_version || 'n/a' }}</p>
           </div>
         </div>
 

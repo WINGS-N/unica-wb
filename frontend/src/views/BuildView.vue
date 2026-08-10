@@ -38,6 +38,7 @@ import {
   targetsLoading,
   deviceImageSvgData,
   ffOverridesCount,
+  firmwarePhaseLabel,
   firmwareProgressForStatus,
   downloadSamsungFw,
   firmwareStatus,
@@ -176,11 +177,7 @@ function latestZipHref() {
             class="mt-3"
             stoppable
             :progress="firmwareProgressForStatus(card.status)"
-            :title="
-              firmwareProgressForStatus(card.status)?.phase === 'extract'
-                ? t('extractProgressLabel')
-                : t('downloadProgressLabel')
-            "
+            :title="firmwarePhaseLabel(firmwareProgressForStatus(card.status))"
             @stop="openStopModalForProgress"
           />
         </div>

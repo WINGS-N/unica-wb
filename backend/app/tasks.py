@@ -164,7 +164,10 @@ _RE_GIT_SPEED = re.compile(r"(\d+(?:\.\d+)?)\s*([KMGTP]?i?B)/s", re.IGNORECASE)
 # Credentials are injected into the git command line, and any text carrying that
 # command must never leave this process with them intact: job errors are shown
 # in the interface and stored in the database
+# The downloader draws two identical unlabeled bars in a row, download then
+# decrypt, so the only thing telling them apart is that the second starts over
 _RE_EXTRACT_LINE = re.compile(r"^\s*-?\s*Extracting\b", re.IGNORECASE)
+_RE_VERIFY_LINE = re.compile(r"^\s*-?\s*Verifying\b", re.IGNORECASE)
 
 # Extraction reports named steps and no numbers at all, so the only honest thing
 # to show is which step is running
@@ -459,6 +462,10 @@ class _FirmwareProgressTracker:
             line = part.strip()
             if not line:
                 continue
+            if _RE_VERIFY_LINE.search(line):
+                self.phase = "verify"
+                self.step = line.strip().lstrip("- ").rstrip(".")
+                self.heartbeat()
             if _RE_EXTRACT_LINE.search(line):
                 self.phase = "extract"
             step = _RE_EXTRACT_STEP.match(line)
@@ -477,6 +484,10 @@ class _FirmwareProgressTracker:
             pct = int(progress.get("percent", -1))
             now = time.time()
             last_pct, last_ts = self._last_emit.get(key, (-1, 0.0))
+            # A fresh bar after a finished one is the next step of the same tool
+            if self.phase == "download" and last_pct >= 99 and 0 <= pct <= 5:
+                self.phase = "decrypt"
+                self.step = ""
             if pct >= 0 and pct == last_pct and (now - last_ts) < 0.9:
                 continue
             self._last_emit[key] = (pct, now)

@@ -274,6 +274,13 @@
     @apply shrink-0 text-un1ca-muted;
   }
 
+  /* Firmware versions are one long token with no spaces, and a mobile card is
+     narrower than they are */
+  .wrap-anywhere {
+    overflow-wrap: anywhere;
+    word-break: break-word;
+  }
+
   .keyval-value {
     @apply min-w-0 text-right font-bold text-un1ca-text;
     overflow-wrap: anywhere;

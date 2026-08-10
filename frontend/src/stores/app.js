@@ -1012,6 +1012,17 @@ export function repoSyncTone() {
 }
 
 /** Nothing downloaded is a different state from having an old copy */
+const FIRMWARE_PHASE_KEYS = {
+  download: 'downloadProgressLabel',
+  decrypt: 'decryptProgressLabel',
+  verify: 'verifyProgressLabel',
+  extract: 'extractProgressLabel'
+}
+
+export function firmwarePhaseLabel(progress) {
+  return t(FIRMWARE_PHASE_KEYS[progress?.phase] || 'downloadProgressLabel')
+}
+
 export function firmwareStatusLabel(statusObj) {
   if (statusObj?.up_to_date) return 'upToDate'
   if (statusObj?.downloaded_version || statusObj?.extracted_version) return 'outdated'
@@ -1380,14 +1391,42 @@ let sockets = []
 let stateSocket = null
 let restFallbackTimer = null
 
+// A finished entry expires on the server by ttl, and that expiry is silent: no
+// event ever says the bar can go. Dropping it here keeps a completed bar from
+// hanging around until the page is reloaded
+const TERMINAL_PROGRESS_LINGER_MS = 12000
+const terminalTimers = new Map()
+
+function dropProgress(store, key) {
+  const next = { ...store.value }
+  delete next[key]
+  store.value = next
+}
+
 function applyHashUpdate(store, key, payload) {
+  const timerKey = `${key}`
+  clearTimeout(terminalTimers.get(timerKey))
+  terminalTimers.delete(timerKey)
+
   if (payload.type === 'removed') {
-    const next = { ...store.value }
-    delete next[key]
-    store.value = next
+    dropProgress(store, key)
     return
   }
   store.value = { ...store.value, [key]: payload }
+
+  if (isTerminalProgress(payload)) {
+    terminalTimers.set(
+      timerKey,
+      setTimeout(() => {
+        terminalTimers.delete(timerKey)
+        dropProgress(store, key)
+      }, TERMINAL_PROGRESS_LINGER_MS)
+    )
+  }
+}
+
+function isTerminalProgress(payload) {
+  return ['completed', 'failed', 'canceled'].includes(String(payload?.status || ''))
 }
 
 const SECTION_LOADING = {
