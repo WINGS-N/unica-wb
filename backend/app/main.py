@@ -2355,7 +2355,17 @@ async def download_samsung_fw(
         target=selected_target,
         operation_name=f"Download {labels[kind]}: {selected_target}",
     )
-    op_job.queue_job_id = await _enqueue_build("download_fw_job_task", op_job.id, selected_target, kind)
+    # Progress is filed under MODEL_CSC, so the keys travel with the job and the
+    # bar lands on the right card
+    defaults = _get_defaults_for_target(ws, selected_target)
+    fw_keys = []
+    for field, wanted in (("source_firmware", "source"), ("target_firmware", "target")):
+        if kind in (wanted, "both"):
+            model, csc = _parse_model_csc(str(defaults.get(field) or ""))
+            if model and csc:
+                fw_keys.append(f"{model}_{csc}".upper())
+
+    op_job.queue_job_id = await _enqueue_build("download_fw_job_task", op_job.id, selected_target, kind, fw_keys)
     db.commit()
     db.refresh(op_job)
     return op_job

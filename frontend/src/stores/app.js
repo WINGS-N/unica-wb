@@ -886,8 +886,10 @@ export function setFollowLogs(value) {
 
 export function logsPlaceholder() {
   const job = selectedJob.value
-  if (job && !job.log_path && (job.status === 'queued' || job.status === 'running')) return t('waitingForWorkerLog')
-  return t('selectJobToStream')
+  if (!job) return t('selectJobToStream')
+  const finished = isTerminalStatus(job.status)
+  if (!job.log_path) return finished ? t('noLogForJob') : t('waitingForWorkerLog')
+  return finished ? t('logIsEmpty') : t('waitingForOutput')
 }
 
 // ---------------------------------------------------------------- repo
@@ -991,6 +993,13 @@ export function repoSyncTone() {
   if (state === 'up_to_date') return 'success'
   if (state === 'behind' || state === 'ahead' || state === 'diverged') return 'warning'
   return 'danger'
+}
+
+/** Nothing downloaded is a different state from having an old copy */
+export function firmwareStatusLabel(statusObj) {
+  if (statusObj?.up_to_date) return 'upToDate'
+  if (statusObj?.downloaded_version || statusObj?.extracted_version) return 'outdated'
+  return 'notDownloaded'
 }
 
 export function firmwareStatusTone(statusObj) {

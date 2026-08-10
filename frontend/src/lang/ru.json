@@ -244,6 +244,7 @@
   "progressFailed": "ошибка",
   "progressCanceled": "отменено",
   "buildStage_start": "Запуск",
+  "buildStage_dependencies": "Сборка зависимостей",
   "buildStage_download": "Скачивание прошивки",
   "buildStage_extract": "Распаковка прошивки",
   "buildStage_workdir": "Создание рабочей папки",
@@ -368,5 +369,9 @@
   "updateDone": "Обновление завершено: установлена версия",
   "downloadFw": "Скачать",
   "downloadQueued": "Загрузка прошивки поставлена в очередь",
-  "failedFirmwareDownload": "Не удалось скачать прошивку"
+  "failedFirmwareDownload": "Не удалось скачать прошивку",
+  "notDownloaded": "Не скачано",
+  "noLogForJob": "Задача не оставила лога",
+  "logIsEmpty": "Лог пуст",
+  "waitingForOutput": "Ожидание вывода..."
 }

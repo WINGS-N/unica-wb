@@ -244,6 +244,7 @@
   "progressFailed": "failed",
   "progressCanceled": "canceled",
   "buildStage_start": "Starting",
+  "buildStage_dependencies": "Building dependencies",
   "buildStage_download": "Downloading firmware",
   "buildStage_extract": "Extracting firmware",
   "buildStage_workdir": "Creating work dir",
@@ -368,5 +369,9 @@
   "updateDone": "App updated to",
   "downloadFw": "Download",
   "downloadQueued": "Firmware download queued",
-  "failedFirmwareDownload": "Firmware download failed"
+  "failedFirmwareDownload": "Firmware download failed",
+  "notDownloaded": "Not downloaded",
+  "noLogForJob": "This job left no log",
+  "logIsEmpty": "The log is empty",
+  "waitingForOutput": "Waiting for output..."
 }

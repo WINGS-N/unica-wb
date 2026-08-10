@@ -32,6 +32,7 @@ import {
   debloatDisabledIds,
   defaultsLoading,
   firmwareDownloadBusyKind,
+  firmwareStatusLabel,
   firmwareStatusLoading,
   repoInfoLoading,
   targetsLoading,
@@ -147,7 +148,7 @@ function latestZipHref() {
             <p class="section-kicker">{{ card.label }}</p>
             <SamsungLoader v-if="firmwareStatusLoading" small />
             <StatusPill v-else :tone="firmwareStatusTone(card.status)" :dot="false">
-              {{ card.status.up_to_date ? t('upToDate') : t('outdated') }}
+              {{ t(firmwareStatusLabel(card.status)) }}
             </StatusPill>
           </div>
           <p class="mt-1 truncate text-[15px] font-bold">

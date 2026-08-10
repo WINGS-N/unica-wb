@@ -121,6 +121,9 @@ _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 # reliable progress signal a shell build gives us. Percentages are the share of
 # wall-clock a full build spends before that step, measured on a cold tree
 _BUILD_STAGE_RULES = [
+    # A first run compiles the toolchain before anything else happens, and that
+    # is the longest silent stretch of the whole build
+    ("dependencies", 3, re.compile(r"^- Building |Building dependencies")),
     ("download", 6, re.compile(r"Downloading required firmwares")),
     ("extract", 16, re.compile(r"Extracting required firmwares")),
     ("workdir", 30, re.compile(r"Creating work dir")),
@@ -333,9 +336,10 @@ def _stream_command_with_progress(
     try:
         with log_file.open("ab") as lf:
             while True:
-                chunk = proc.stdout.read(4096)
-                if chunk == "":
+                raw = os.read(proc.stdout.fileno(), 4096)
+                if not raw:
                     break
+                chunk = raw.decode("utf-8", errors="ignore")
                 lf.write(chunk.encode("utf-8", errors="ignore"))
                 lf.flush()
                 for line in re.split(r"[\r\n]+", chunk):
@@ -539,9 +543,13 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
             try:
                 last_heartbeat = 0.0
                 while True:
-                    chunk = proc.stdout.read(4096)
-                    if chunk == "":
+                    # Reading from the descriptor hands over whatever is there;
+                    # a sized read on the text wrapper waits for a full buffer
+                    # and holds sparse output back
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
                         break
+                    chunk = raw.decode("utf-8", errors="ignore")
                     lf.write(chunk.encode("utf-8", errors="ignore"))
                     lf.flush()
                     tracker.feed(chunk)
@@ -566,7 +574,7 @@ def run_extract_samsung_fw_job(job_id: str, fw_key: str, target_codename: str):
     _run_operation_job(job_id, _op)
 
 
-def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str):
+def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw_keys: list[str] | None = None):
     # Downloading is its own operation so a firmware can be fetched ahead of a
     # build, which is the slow part of a first run
     def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
@@ -583,7 +591,7 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str):
         odin_dir = ctx.out / "odin"
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
-        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, [], phase="download")
+        tracker = _FirmwareProgressTracker(job_id, ctx.fw_scope, list(fw_keys or []), phase="download")
         tracker.heartbeat()
         with log_file.open("ab") as lf:
             lf.write(f"[download] target={target_codename} kind={kind}\n".encode())
@@ -604,9 +612,13 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str):
             try:
                 last_heartbeat = 0.0
                 while True:
-                    chunk = proc.stdout.read(4096)
-                    if chunk == "":
+                    # Reading from the descriptor hands over whatever is there;
+                    # a sized read on the text wrapper waits for a full buffer
+                    # and holds sparse output back
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
                         break
+                    chunk = raw.decode("utf-8", errors="ignore")
                     lf.write(chunk.encode("utf-8", errors="ignore"))
                     lf.flush()
                     tracker.feed(chunk)
@@ -1249,9 +1261,13 @@ def run_build_job(job_id: str):
             try:
                 last_heartbeat = 0.0
                 while True:
-                    chunk = proc.stdout.read(4096)
-                    if chunk == "":
+                    # Reading from the descriptor hands over whatever is there;
+                    # a sized read on the text wrapper waits for a full buffer
+                    # and holds sparse output back
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
                         break
+                    chunk = raw.decode("utf-8", errors="ignore")
                     lf.write(chunk.encode("utf-8", errors="ignore"))
                     lf.flush()
                     tracker.feed(chunk)

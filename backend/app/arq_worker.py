@@ -46,8 +46,8 @@ async def extract_fw_job_task(_ctx, job_id: str, fw_key: str, target_codename: s
     await asyncio.to_thread(run_extract_samsung_fw_job, job_id, fw_key, target_codename)
 
 
-async def download_fw_job_task(_ctx, job_id: str, target_codename: str, kind: str):
-    await asyncio.to_thread(run_download_samsung_fw_job, job_id, target_codename, kind)
+async def download_fw_job_task(_ctx, job_id: str, target_codename: str, kind: str, fw_keys: list[str]):
+    await asyncio.to_thread(run_download_samsung_fw_job, job_id, target_codename, kind, fw_keys)
 
 
 async def delete_fw_job_task(_ctx, job_id: str, fw_type: str, fw_key: str):
