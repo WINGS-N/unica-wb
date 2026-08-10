@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted } from 'vue'
-import { Download, Layers } from 'lucide-vue-next'
+import { Download, Layers, Trash2 } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -9,6 +9,7 @@ import { downloadUrl } from '../stores/api.js'
 import {
   artifacts,
   artifactsLoading,
+  deleteArtifact,
   fetchArtifacts,
   formatBytes,
   formatDateTime,
@@ -53,6 +54,17 @@ onMounted(fetchArtifacts)
             @click="openIncrementalModal({ id: item.job_id, target: item.target })"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+          <button v-if="item.exists" type="button" class="chip-button" @click="deleteArtifact(item, 'rom')">
+            <Trash2 :size="14" /> {{ t('delete') }}
+          </button>
+          <button
+            v-if="item.target_files_exists"
+            type="button"
+            class="chip-button"
+            @click="deleteArtifact(item, 'target_files')"
+          >
+            <Trash2 :size="14" /> {{ t('deleteTargetFiles') }}
           </button>
         </div>
       </article>

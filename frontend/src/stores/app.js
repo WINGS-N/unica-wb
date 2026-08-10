@@ -1115,6 +1115,24 @@ export async function openIncrementalModal(job) {
   }
 }
 
+export async function deleteArtifact(job, kind = 'rom') {
+  const ok = await confirm({
+    title: t('deleteArtifactTitle'),
+    message: kind === 'target_files' ? t('deleteTargetFilesMessage') : t('deleteArtifactMessage'),
+    confirmText: t('delete'),
+    danger: true
+  })
+  if (!ok) return
+  try {
+    await apiFetch(`/jobs/${job.id ?? job.job_id}/artifact`, { method: 'DELETE', params: { kind } })
+    showToast(t('artifactDeleted'), 'success')
+    await Promise.all([fetchJobs(), fetchArtifacts()])
+    if (incrementalForJob.value) await openIncrementalModal(incrementalForJob.value)
+  } catch (e) {
+    reportError('artifactDeleteFailed', e)
+  }
+}
+
 export async function queueIncrementalZip() {
   const job = incrementalForJob.value
   const base = incrementalBase.value

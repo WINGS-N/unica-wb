@@ -393,5 +393,11 @@
   "incrementalHint": "Pack the difference against an earlier build of the same target",
   "incrementalQueued": "Incremental zip queued",
   "failedIncremental": "Incremental zip failed",
-  "noIncrementalBases": "No earlier build with a target-files archive"
+  "noIncrementalBases": "No earlier build with a target-files archive",
+  "deleteArtifactTitle": "Delete artifact",
+  "deleteArtifactMessage": "The flashable zip will be removed from disk",
+  "deleteTargetFilesMessage": "The target-files archive will be removed from disk, and incremental updates against this build become impossible",
+  "artifactDeleted": "Artifact deleted",
+  "artifactDeleteFailed": "Failed to delete the artifact",
+  "deleteTargetFiles": "Delete target-files"
 }

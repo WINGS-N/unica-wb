@@ -393,5 +393,11 @@
   "incrementalHint": "Упаковать разницу с более ранней сборкой того же таргета",
   "incrementalQueued": "Инкрементальный зип поставлен в очередь",
   "failedIncremental": "Не удалось собрать инкрементальный зип",
-  "noIncrementalBases": "Нет ранней сборки с архивом target-files"
+  "noIncrementalBases": "Нет ранней сборки с архивом target-files",
+  "deleteArtifactTitle": "Удалить артефакт",
+  "deleteArtifactMessage": "Прошивочный зип будет удалён с диска",
+  "deleteTargetFilesMessage": "Архив target-files будет удалён с диска, инкрементальные обновления относительно этой сборки станут невозможны",
+  "artifactDeleted": "Артефакт удалён",
+  "artifactDeleteFailed": "Не удалось удалить артефакт",
+  "deleteTargetFiles": "Удалить target-files"
 }
