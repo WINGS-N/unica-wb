@@ -9,6 +9,7 @@ from .tasks import (
     run_delete_samsung_fw_job,
     run_download_samsung_fw_job,
     run_extract_samsung_fw_job,
+    run_incremental_zip_job,
     run_repo_clone_job,
     run_repo_delete_job,
     run_repo_pull_job,
@@ -50,6 +51,10 @@ async def download_fw_job_task(_ctx, job_id: str, target_codename: str, kind: st
     await asyncio.to_thread(run_download_samsung_fw_job, job_id, target_codename, kind, fw_keys)
 
 
+async def incremental_zip_job_task(_ctx, job_id: str, base_path: str, target_files_path: str, target_codename: str):
+    await asyncio.to_thread(run_incremental_zip_job, job_id, base_path, target_files_path, target_codename)
+
+
 async def delete_fw_job_task(_ctx, job_id: str, fw_type: str, fw_key: str):
     await asyncio.to_thread(run_delete_samsung_fw_job, job_id, fw_type, fw_key)
 
@@ -82,6 +87,7 @@ class WorkerSettingsBuilds:
     functions = [
         build_job_task,
         download_fw_job_task,
+        incremental_zip_job_task,
         extract_fw_job_task,
         delete_fw_job_task,
         repo_clone_job_task,

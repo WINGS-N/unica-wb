@@ -39,6 +39,7 @@ class BuildJobRead(BaseModel):
     force: bool
     no_rom_zip: bool
     skip_target_files: bool
+    target_files_path: str | None = None
     status: str
     queue_job_id: str | None
     return_code: int | None

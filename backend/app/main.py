@@ -1272,6 +1272,8 @@ def _list_artifacts_with_new_session(workspace_id: str, target: str | None = Non
             exists = bool(job.artifact_path and Path(job.artifact_path).exists())
             if exists:
                 size = Path(job.artifact_path).stat().st_size
+            target_files = Path(str(job.target_files_path)) if job.target_files_path else None
+            target_files_exists = bool(target_files and target_files.is_file())
             items.append(
                 {
                     "job_id": job.id,
@@ -1279,6 +1281,8 @@ def _list_artifacts_with_new_session(workspace_id: str, target: str | None = Non
                     "artifact_path": job.artifact_path,
                     "size_bytes": size,
                     "exists": exists,
+                    "target_files_exists": target_files_exists,
+                    "target_files_size": target_files.stat().st_size if target_files_exists else 0,
                     "finished_at": job.finished_at.isoformat() if job.finished_at else None,
                     "source_commit": job.source_commit,
                     "version_major": job.version_major,
@@ -2326,6 +2330,79 @@ async def delete_samsung_fw_entry(
         operation_name=f"Delete {fw_type.upper()} FW entry: {fw_key}",
     )
     op_job.queue_job_id = await _enqueue_build("delete_fw_job_task", op_job.id, fw_type, fw_key)
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.get(f"{settings.api_prefix}/artifacts/target/files")
+async def list_target_files(target: str, workspace: str | None = None, db: Session = Depends(get_db)):
+    # Only builds of the same target can be compared, and only while the archive
+    # they produced is still on disk
+    ws = _require_ws(db, workspace)
+    rows = (
+        db.query(BuildJob)
+        .filter(
+            BuildJob.workspace_id == ws.id,
+            BuildJob.job_kind == "build",
+            BuildJob.status == "succeeded",
+            BuildJob.target == target,
+            BuildJob.target_files_path.isnot(None),
+        )
+        .order_by(BuildJob.finished_at.desc())
+        .limit(50)
+        .all()
+    )
+    items = []
+    for row in rows:
+        path = Path(str(row.target_files_path or ""))
+        if not path.is_file():
+            continue
+        items.append(
+            {
+                "job_id": row.id,
+                "name": path.name,
+                "path": str(path),
+                "size": path.stat().st_size,
+                "finished_at": row.finished_at.isoformat() if row.finished_at else "",
+            }
+        )
+    return {"items": items}
+
+
+@app.post(f"{settings.api_prefix}/jobs/{{job_id}}/incremental", response_model=BuildJobRead)
+async def queue_incremental_zip(
+    job_id: str,
+    base_job_id: str,
+    workspace: str | None = None,
+    db: Session = Depends(get_db),
+):
+    ws = _require_ws(db, workspace)
+    job = db.get(BuildJob, job_id)
+    base = db.get(BuildJob, base_job_id)
+    if not job or not base:
+        raise HTTPException(404, "Job not found")
+    if job.target != base.target:
+        raise HTTPException(400, "Both builds must be for the same target")
+    if job.id == base.id:
+        raise HTTPException(400, "Pick a different build as the base")
+    for row in (job, base):
+        if not row.target_files_path or not Path(str(row.target_files_path)).is_file():
+            raise HTTPException(400, "Target-files zip is not available for this build")
+
+    op_job = _create_operation_job(
+        db,
+        workspace_id=ws.id,
+        target=job.target,
+        operation_name=f"Incremental zip: {job.target} from {Path(str(base.target_files_path)).name}",
+    )
+    op_job.queue_job_id = await _enqueue_build(
+        "incremental_zip_job_task",
+        op_job.id,
+        str(base.target_files_path),
+        str(job.target_files_path),
+        job.target,
+    )
     db.commit()
     db.refresh(op_job)
     return op_job

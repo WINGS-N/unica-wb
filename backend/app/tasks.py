@@ -806,6 +806,64 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw
     _run_operation_job(job_id, _op)
 
 
+def run_incremental_zip_job(job_id: str, base_path: str, target_files_path: str, target_codename: str):
+    # Packs the difference between two builds that already exist, so nothing has
+    # to be rebuilt to change which one the update is measured against
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        cmd = (
+            f"cd {shlex.quote(str(ctx.root))} && "
+            f"source buildenv.sh {shlex.quote(target_codename)} && "
+            f"scripts/build_flashable_zip.sh --incremental {shlex.quote(base_path)} "
+            f"{shlex.quote(target_files_path)}"
+        )
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        started = time.time()
+        with log_file.open("ab") as lf:
+            lf.write(f"[incremental] base={Path(base_path).name} target={Path(target_files_path).name}\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+            _set_job_pid(job_id, proc.pid)
+            assert proc.stdout
+            canceled = False
+            try:
+                while True:
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
+                        break
+                    chunk = raw.decode("utf-8", errors="ignore")
+                    lf.write(chunk.encode("utf-8", errors="ignore"))
+                    lf.flush()
+                rc = proc.wait()
+                db = SessionLocal()
+                try:
+                    canceled = _job_status(db, job_id) == "canceled"
+                    if rc == 0 and not canceled:
+                        artifact = _pick_newest(ctx.out, "UN1CA_*INCREMENTAL*.zip", started)
+                        if artifact:
+                            row = db.get(BuildJob, job_id)
+                            if row:
+                                row.artifact_path = artifact
+                                db.commit()
+                finally:
+                    db.close()
+                if rc != 0 and not canceled:
+                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+            finally:
+                _set_job_pid(job_id, None)
+                _invalidate_dir_size_cache_paths([ctx.out])
+
+    _run_operation_job(job_id, _op)
+
+
 def run_delete_samsung_fw_job(job_id: str, fw_type: str, fw_key: str):
     # Delete cached Odin/FW entry from out tree
     def _delete(log_file: Path, ctx: ws_lib.WorkspaceRef):
@@ -1244,6 +1302,21 @@ def run_stop_job_task(job_id: str, signal_type: str = "sigterm"):
         db.close()
 
 
+def _pick_newest(out_dir: Path, pattern: str, started_at: float) -> str | None:
+    matches = []
+    for path in glob.glob(str(out_dir / pattern)):
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            continue
+        if mtime + 1.0 >= started_at:
+            matches.append((mtime, path))
+    if not matches:
+        return None
+    matches.sort(reverse=True)
+    return matches[0][1]
+
+
 def _pick_artifact(out_dir: Path, started_at: float) -> str | None:
     # Only a zip produced by this run counts. Without the mtime guard a build
     # that produced nothing would happily adopt someone else's older artifact
@@ -1523,6 +1596,12 @@ def run_build_job(job_id: str):
                 artifact = _pick_artifact(ctx.out, run_started_at)
                 if artifact:
                     job.artifact_path = artifact
+            if not job.skip_target_files:
+                # Kept on the job so an incremental zip can be packed later
+                # without hunting for the archive this build produced
+                target_files = _pick_newest(ctx.out, f"{job.target}_*-target_files.zip", run_started_at)
+                if target_files:
+                    job.target_files_path = target_files
         else:
             job.status = "failed"
             job.error = f"Build failed with return code {rc}"
