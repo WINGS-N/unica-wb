@@ -22,23 +22,26 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 RUN git config --global user.name "UN1CA Builder" && \
     git config --global user.email "builder@local"
 
+# The python dependencies sit on their own so application code can change
+# without reinstalling them
+FROM runtime-base AS api-deps
 WORKDIR /app
 COPY backend/requirements.txt /app/requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install -r /app/requirements.txt
 
-FROM runtime-base AS app-layer
+FROM api-deps AS api
 COPY backend/app /app/app
 COPY backend/scripts /app/scripts
 RUN mkdir -p /data/logs /workspace
-
-FROM app-layer AS api
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS http://127.0.0.1:8000/api/v1/healthz || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/scripts/start-api.sh"]
 
-FROM runtime-base AS worker-base
+# The build toolchain is by far the most expensive layer in this file, so it is
+# anchored to the small base and never rebuilds because a python dependency moved
+FROM runtime-base AS worker-tools
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
@@ -82,8 +85,15 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     jq \
     && rm -rf /var/lib/apt/lists/*
 
-FROM worker-base AS worker
-COPY --from=app-layer /app /app
+FROM worker-tools AS worker-deps
 WORKDIR /app
+COPY backend/requirements.txt /app/requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r /app/requirements.txt
+
+FROM worker-deps AS worker
+COPY backend/app /app/app
+COPY backend/scripts /app/scripts
+RUN mkdir -p /data/logs /workspace
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/scripts/start-worker.sh"]

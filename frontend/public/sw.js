@@ -189,7 +189,7 @@ self.addEventListener('push', (event) => {
         visible.postMessage({ type: 'notification', payload })
         return
       }
-      await self.registration.showNotification(payload.title || 'UN1CA Build', {
+      await self.registration.showNotification(payload.title || 'UN1CA Builder', {
         body: payload.body || '',
         icon: '/icon-192.png',
         badge: '/icon-192.png',

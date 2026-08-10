@@ -30,7 +30,21 @@ tasks:
       - rm -rf ../desktop/{{.WEBUI}}
       - mkdir -p ../desktop/{{.WEBUI}}
       - cp -r dist/. ../desktop/{{.WEBUI}}/
+      - find ../desktop/{{.WEBUI}} -name '*.br' -o -name '*.gz' -delete
       - touch ../desktop/{{.WEBUI}}/.gitkeep
+
+  webui:check:
+    desc: Refuse to package an interface built for another version
+    cmds:
+      - |
+        test -f {{.WEBUI}}/index.html || {
+          echo "no interface is staged, run: VERSION={{.VERSION}} task webui"; exit 1;
+        }
+      - |
+        staged=$(cat {{.WEBUI}}/version.txt 2>/dev/null || echo unknown)
+        test "$staged" = "{{.VERSION}}" || {
+          echo "staged interface is $staged, not {{.VERSION}}; run: VERSION={{.VERSION}} task webui"; exit 1;
+        }
 
   webui:clean:
     cmds:
@@ -121,6 +135,7 @@ tasks:
   package:
     desc: Build every Linux artifact
     cmds:
+      - task: webui:check
       - task: package:deb
       - task: package:archive
       - task: package:appimage

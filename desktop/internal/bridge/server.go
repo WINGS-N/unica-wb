@@ -218,8 +218,8 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 		close(ch)
 	}()
 
-	// A splash window that opens mid-startup gets the current state first, and
-	// a password prompt raised before it connected would otherwise be lost
+	// A splash window that opens mid-startup gets the current state first,
+	// including a password prompt raised before it connected
 	if last := s.emitter.Last(); last != nil {
 		writeSSE(w, "progress", last)
 	}

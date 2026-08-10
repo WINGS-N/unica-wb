@@ -24,14 +24,14 @@ MESSAGES = {
         "build_failed": ("Build failed", "{target}: {error}"),
         "build_canceled": ("Build canceled", "{target} was stopped"),
         "operation_failed": ("Operation failed", "{name}: {error}"),
-        "test": ("UN1CA Build", "Notifications are on"),
+        "test": ("UN1CA Builder", "Notifications are on"),
     },
     "ru": {
         "build_succeeded": ("Сборка готова", "{target} {version} собран"),
         "build_failed": ("Сборка упала", "{target}: {error}"),
         "build_canceled": ("Сборка отменена", "{target} остановлен"),
         "operation_failed": ("Операция не удалась", "{name}: {error}"),
-        "test": ("UN1CA Build", "Уведомления включены"),
+        "test": ("UN1CA Builder", "Уведомления включены"),
     },
 }
 

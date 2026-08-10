@@ -150,9 +150,8 @@ func get(t *testing.T, url string) (string, int) {
 	return string(body), resp.StatusCode
 }
 
-// A check that fails within milliseconds of launch used to publish its failure
-// before any window had connected, which left the screen on the last progress
-// line with no button
+// A check can fail within milliseconds of launch, before any window has
+// connected, and the failure still has to reach the screen
 func TestFailureRaisedBeforeAnyoneConnectedIsStillDelivered(t *testing.T) {
 	srv, base := startTestServer(t)
 	srv.emitter.Stage("check", 80, "Checking f2fs support")

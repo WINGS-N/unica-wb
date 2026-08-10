@@ -253,7 +253,7 @@ func TestSplashIsServed(t *testing.T) {
 	if _, err := buf.ReadFrom(resp.Body); err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if !strings.Contains(buf.String(), "UN1CA Build") {
+	if !strings.Contains(buf.String(), "UN1CA Builder") {
 		t.Fatal("splash markup does not look right")
 	}
 }

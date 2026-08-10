@@ -1,4 +1,4 @@
-# UN1CA Web Builder (unica-wb)
+# UN1CA Builder (unica-wb)
 
 
 README in progress...

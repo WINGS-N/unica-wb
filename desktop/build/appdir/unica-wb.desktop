@@ -7,4 +7,4 @@ Icon=unica-wb
 Terminal=false
 Categories=Development;
 StartupNotify=true
-X-AppImage-Version=2.3.0
+X-AppImage-Version=3.0.0

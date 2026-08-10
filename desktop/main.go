@@ -38,9 +38,10 @@ type launcher struct {
 	splash *application.WebviewWindow
 	main   *application.WebviewWindow
 
-	quitApproved atomic.Bool
-	shuttingDown atomic.Bool
-	dialogOpen   atomic.Bool
+	quitApproved  atomic.Bool
+	shuttingDown  atomic.Bool
+	dialogOpen    atomic.Bool
+	splashRetired atomic.Bool
 
 	i18nMu   sync.RWMutex
 	language string
@@ -92,7 +93,7 @@ func main() {
 	l.server.OnLanguage = l.setLanguage
 
 	l.app = application.New(application.Options{
-		Name:        "UN1CA Build",
+		Name:        "UN1CA Builder",
 		Description: "UN1CA firmware build launcher " + version,
 		SingleInstance: &application.SingleInstanceOptions{
 			UniqueID: "org.unica.wb.launcher",
@@ -118,7 +119,7 @@ func main() {
 func (l *launcher) newSplashWindow(baseURL string) *application.WebviewWindow {
 	win := l.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:          splashWindowName,
-		Title:         "UN1CA Build",
+		Title:         "UN1CA Builder",
 		Width:         780,
 		Height:        560,
 		DisableResize: true,
@@ -135,14 +136,14 @@ func (l *launcher) newSplashWindow(baseURL string) *application.WebviewWindow {
 	win.RegisterHook(events.Common.WindowShow, func(*application.WindowEvent) {
 		gtkwin.MakeTransparent(win.NativeWindow())
 	})
-	l.attachCloseConfirm(win)
+	l.attachCloseConfirm(win, true)
 	return win
 }
 
 func (l *launcher) newMainWindow() *application.WebviewWindow {
 	win := l.app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:             mainWindowName,
-		Title:            "UN1CA Build",
+		Title:            "UN1CA Builder",
 		Width:            1400,
 		Height:           900,
 		MinWidth:         420,
@@ -154,7 +155,7 @@ func (l *launcher) newMainWindow() *application.WebviewWindow {
 		// and it has to work from the container origin too
 		JS: desktopBridgeJS(l.server.BaseURL()),
 	})
-	l.attachCloseConfirm(win)
+	l.attachCloseConfirm(win, false)
 	return win
 }
 
@@ -284,8 +285,13 @@ func desktopBridgeJS(baseURL string) string {
 
 // attachCloseConfirm turns a window close into the same confirmation Electron
 // showed, because closing the window also stops every build container
-func (l *launcher) attachCloseConfirm(win *application.WebviewWindow) {
+func (l *launcher) attachCloseConfirm(win *application.WebviewWindow, isSplash bool) {
 	win.RegisterHook(events.Common.WindowClosing, func(e *application.WindowEvent) {
+		// The startup screen is closed by the launcher itself once the build
+		// interface is up, and that is not the user asking to quit
+		if isSplash && l.splashRetired.Load() {
+			return
+		}
 		if l.quitApproved.Load() || l.shuttingDown.Load() {
 			return
 		}
@@ -451,10 +457,10 @@ func (l *launcher) openMainWindow() {
 	if l.splash != nil {
 		splash := l.splash
 		l.splash = nil
-		// The splash close must not trigger the exit confirmation
-		l.quitApproved.Store(true)
-		splash.Close()
-		l.quitApproved.Store(false)
+		// The flag has to outlive the call, because the close is handled on the
+		// main thread after Close returns
+		l.splashRetired.Store(true)
+		application.InvokeAsync(splash.Close)
 	}
 }
 
@@ -474,7 +480,8 @@ func (l *launcher) shutdown() {
 		l.main.Hide()
 	}
 	if l.splash == nil {
-		l.splash = l.newSplashWindow(l.server.BaseURL())
+		l.splashRetired.Store(false)
+		l.splash = l.newSplashWindow(l.server.SplashURL())
 	} else {
 		l.splash.Show()
 		l.splash.Focus()

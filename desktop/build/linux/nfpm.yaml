@@ -5,7 +5,7 @@ section: devel
 priority: optional
 maintainer: WINGS-N <wings-n@users.noreply.github.com>
 description: |
-  UN1CA Build launcher.
+  UN1CA Builder launcher.
   Starts the build stack in Docker and opens the build interface.
 vendor: WINGS-N
 homepage: https://github.com/WINGS-N/unica-wb

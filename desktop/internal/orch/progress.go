@@ -141,9 +141,8 @@ func (e *Emitter) Shutdown(progress int, message string) {
 	e.Emit(Progress{Stage: "shutdown", Progress: p, TotalProgress: p, Message: message})
 }
 
-// LastFailure is the failure the user still has to act on. A window that
-// connects after the sequence already failed would otherwise never learn about
-// it and would sit on the last progress line forever
+// LastFailure is the failure the user still has to act on, replayed to a
+// window that connects after the sequence already failed
 func (e *Emitter) LastFailure() *Failure {
 	e.mu.RLock()
 	defer e.mu.RUnlock()

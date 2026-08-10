@@ -1,6 +1,8 @@
 import { execSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { brotliCompressSync, constants, gzipSync } from 'node:zlib'
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
@@ -25,8 +27,61 @@ function resolveVersion() {
 
 const version = resolveVersion()
 
+const COMPRESSIBLE = /\.(js|mjs|css|html|json|svg|webmanifest|txt|map|ico)$/i
+// Below this the framing overhead eats the win and the request is one packet
+// either way
+const MIN_BYTES = 1024
+
+function* walk(dir) {
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name)
+    if (entry.isDirectory()) yield* walk(full)
+    else yield full
+  }
+}
+
+// Compressing once at build time lets the server hand out the bytes as they
+// are, at a level no on-the-fly compressor would spend the cpu on
+function precompress() {
+  return {
+    name: 'precompress-assets',
+    apply: 'build',
+    closeBundle() {
+      const outDir = fileURLToPath(new URL('./dist', import.meta.url))
+      let saved = 0
+      let count = 0
+      for (const file of walk(outDir)) {
+        if (!COMPRESSIBLE.test(file)) continue
+        const raw = readFileSync(file)
+        if (raw.length < MIN_BYTES) continue
+
+        const br = brotliCompressSync(raw, {
+          params: {
+            [constants.BROTLI_PARAM_QUALITY]: constants.BROTLI_MAX_QUALITY,
+            [constants.BROTLI_PARAM_SIZE_HINT]: raw.length,
+            [constants.BROTLI_PARAM_LGWIN]: 24
+          }
+        })
+        const gz = gzipSync(raw, { level: constants.Z_BEST_COMPRESSION })
+
+        // A variant bigger than the source would only waste a round trip
+        if (br.length < raw.length) {
+          writeFileSync(`${file}.br`, br)
+          saved += raw.length - br.length
+          count += 1
+        }
+        if (gz.length < raw.length) writeFileSync(`${file}.gz`, gz)
+      }
+      // Stamped so a packaging step can refuse a build staged for another version
+      writeFileSync(join(outDir, 'version.txt'), version)
+      const kb = (n) => `${(n / 1024).toFixed(1)} kB`
+      console.log(`precompress: ${count} files, ${kb(saved)} saved with brotli`)
+    }
+  }
+}
+
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [vue(), precompress()],
   define: {
     __APP_VERSION__: JSON.stringify(version),
     // Stamps the service worker url, so a worker is only ever activated for the

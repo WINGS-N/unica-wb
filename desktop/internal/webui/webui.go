@@ -58,7 +58,7 @@ func Handler() http.Handler {
 			serveIndex(w, r)
 			return
 		}
-		// A fresh port on every launch would otherwise reuse a stale worker
+		// The port changes on every launch, so the worker must be revalidated
 		if name == "sw.js" {
 			w.Header().Set("Cache-Control", "no-cache")
 		}

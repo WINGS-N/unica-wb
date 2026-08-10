@@ -6,7 +6,7 @@ export const APP_VERSION = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__
 export const BULLET = '\u2022'
 
 export const PROJECT = {
-  name: 'UN1CA Build',
+  name: 'UN1CA Builder',
   team: 'WINGS-N',
   license: 'GPL-3.0-or-later',
   teamUrl: 'https://github.com/WINGS-N',
