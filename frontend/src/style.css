@@ -487,6 +487,28 @@
     border-color: rgba(18, 89, 209, 0.45);
   }
 
+  .chip-button.is-success {
+    color: theme('colors.un1ca.success');
+    background: rgba(35, 168, 110, 0.16);
+    border-color: rgba(35, 168, 110, 0.45);
+  }
+
+  .chip-button.is-success:hover {
+    background: rgba(35, 168, 110, 0.26);
+    color: theme('colors.un1ca.success');
+  }
+
+  .chip-button.is-danger {
+    color: theme('colors.un1ca.danger');
+    background: rgba(224, 74, 74, 0.16);
+    border-color: rgba(224, 74, 74, 0.45);
+  }
+
+  .chip-button.is-danger:hover {
+    background: rgba(224, 74, 74, 0.26);
+    color: theme('colors.un1ca.danger');
+  }
+
   /* The separator owns its spacing, so the markup carries no stray whitespace */
   .license-sep {
     @apply mx-2 inline-block text-un1ca-kicker;

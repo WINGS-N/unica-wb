@@ -10,7 +10,6 @@ import { downloadUrl } from '../stores/api.js'
 import { goTab, openOverlay } from '../stores/nav.js'
 import {
   buildProgress,
-  openDeleteArtifactModal,
   filteredJobs,
   formatDateTime,
   hasJobDebloatChanges,
@@ -25,6 +24,7 @@ import {
   loadDebloatFromJob,
   loadFFFromJob,
   loadModsFromJob,
+  openDeleteArtifactModal,
   openIncrementalModal,
   openStopModal,
   parseJobMods,
@@ -121,13 +121,18 @@ function openJobMods(job) {
           >
             <Octagon :size="14" /> {{ t('stop') }}
           </button>
-          <a v-if="job.artifact_path" class="chip-button" :href="downloadUrl(`/jobs/${job.id}/artifact`)" @click.stop>
+          <a
+            v-if="job.artifact_path"
+            class="chip-button is-success"
+            :href="downloadUrl(`/jobs/${job.id}/artifact`)"
+            @click.stop
+          >
             <Download :size="14" /> {{ t('downloadZip') }}
           </a>
           <button
             v-if="job.artifact_path || job.target_files_path"
             type="button"
-            class="chip-button"
+            class="chip-button is-danger"
             @click.stop="openDeleteArtifactModal(job)"
           >
             <Trash2 :size="14" /> {{ t('delete') }}

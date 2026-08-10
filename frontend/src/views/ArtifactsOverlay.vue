@@ -44,7 +44,7 @@ onMounted(fetchArtifacts)
           <StatusPill v-if="!item.exists" tone="danger" :dot="false">{{ t('artifactMissing') }}</StatusPill>
         </div>
         <div class="mt-3 flex flex-wrap gap-2">
-          <a v-if="item.exists" class="chip-button" :href="downloadUrl(`/jobs/${item.job_id}/artifact`)">
+          <a v-if="item.exists" class="chip-button is-success" :href="downloadUrl(`/jobs/${item.job_id}/artifact`)">
             <Download :size="14" /> {{ t('downloadZip') }}
           </a>
           <button
@@ -58,7 +58,7 @@ onMounted(fetchArtifacts)
           <button
             v-if="item.exists || item.target_files_exists"
             type="button"
-            class="chip-button"
+            class="chip-button is-danger"
             @click="openDeleteArtifactModal(item)"
           >
             <Trash2 :size="14" /> {{ t('delete') }}
