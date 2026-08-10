@@ -93,6 +93,9 @@ def _ensure_fw_extracted(
 def _to_bytes(number: float, unit: str) -> int:
     # Normalize KiB/MiB/GiB and plain KB/MB into bytes
     normalized = (unit or "").strip().upper().replace("IB", "B")
+    # A bare K/M/G means the same as KB/MB/GB
+    if normalized and not normalized.endswith("B"):
+        normalized += "B"
     scale = {
         "B": 1,
         "KB": 1024,
@@ -110,11 +113,18 @@ _RE_MODEL_CSC = re.compile(r"(SM-[A-Z0-9]+)[/_]([A-Z0-9]{2,4})", re.IGNORECASE)
 # carries a done/total byte pair or a transfer speed
 _RE_TQDM_PERCENT = re.compile(r"(?<![\d.])(?P<pct>\d{1,3})\s*%\s*\|")
 _RE_LOOSE_PERCENT = re.compile(r"(?<![\d.])(?P<pct>\d{1,3})\s*%")
+# tqdm writes units both ways: 2.86GB and a bare 10.1G, so the B is optional
+_BYTE_UNIT = r"(?:[KMGTP]i?B?|B)"
 _RE_BYTES = re.compile(
-    r"(?P<done>\d+(?:\.\d+)?)\s*(?P<du>[KMGTP]?i?B)\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<tu>[KMGTP]?i?B)",
+    rf"(?P<done>\d+(?:\.\d+)?)\s*(?P<du>{_BYTE_UNIT})\s*/\s*(?P<total>\d+(?:\.\d+)?)\s*(?P<tu>{_BYTE_UNIT})",
     re.IGNORECASE,
 )
-_RE_SPEED = re.compile(r"(?P<spd>\d+(?:\.\d+)?)\s*(?P<su>[KMGTP]?i?B)/s", re.IGNORECASE)
+# A download with an unknown size prints only what it has done so far
+_RE_BYTES_DONE_ONLY = re.compile(
+    rf"(?<![\d./])(?P<done>\d+(?:\.\d+)?)\s*(?P<du>{_BYTE_UNIT})\s*\[",
+    re.IGNORECASE,
+)
+_RE_SPEED = re.compile(rf"(?P<spd>\d+(?:\.\d+)?)\s*(?P<su>{_BYTE_UNIT})/s", re.IGNORECASE)
 _RE_ELAPSED_ETA = re.compile(r"\[(?P<elapsed>\d{1,2}:\d{2}(?::\d{2})?)<(?P<eta>\d{1,2}:\d{2}(?::\d{2})?)")
 _DIR_CACHE_KEY_PREFIX = "un1ca:cache:dir_size:"
 
@@ -191,17 +201,20 @@ def _parse_progress(text: str) -> dict | None:
     if not text:
         return None
     bytes_match = _RE_BYTES.search(text)
+    done_only = None if bytes_match else _RE_BYTES_DONE_ONLY.search(text)
     speed_match = _RE_SPEED.search(text)
     pct_match = _RE_TQDM_PERCENT.search(text)
     if not pct_match and (bytes_match or speed_match):
         pct_match = _RE_LOOSE_PERCENT.search(text)
-    if not pct_match and not bytes_match:
+    if not pct_match and not bytes_match and not done_only:
         return None
     payload: dict[str, int] = {}
     percent = None
     if pct_match:
         percent = max(0, min(100, int(pct_match.group("pct"))))
         payload["percent"] = percent
+    if done_only:
+        payload["downloaded_bytes"] = _to_bytes(float(done_only.group("done")), done_only.group("du"))
     if bytes_match:
         done_val = float(bytes_match.group("done"))
         total_val = float(bytes_match.group("total"))

@@ -94,6 +94,14 @@ watch(
 
 const speedBps = computed(() => (status.value === 'running' ? lastSpeed.value : 0))
 
+// A download of unknown size reports only what it has fetched, and that is worth
+// showing on its own
+const bytesLabel = computed(() => {
+  if (lastTotal.value) return `${formatBytes(lastDone.value)} / ${formatBytes(lastTotal.value)}`
+  if (lastDone.value) return formatBytes(lastDone.value)
+  return 'n/a'
+})
+
 const sinceUpdate = computed(() => Math.max(0, Math.floor((now.value - receivedAt.value) / 1000)))
 
 const elapsedSec = computed(() => {
@@ -134,7 +142,7 @@ const hasMeta = computed(
       <div class="progress-fill" :class="fillClass" :style="{ width: `${indeterminate ? 38 : pct}%` }" />
     </div>
     <div v-if="hasMeta" class="progress-meta">
-      <span>{{ lastTotal ? `${formatBytes(lastDone)} / ${formatBytes(lastTotal)}` : 'n/a' }}</span>
+      <span>{{ bytesLabel }}</span>
       <span>{{ t('speedLabel') }}: {{ speedBps ? formatSpeed(speedBps) : 'n/a' }}</span>
       <span>{{ t('elapsedLabel') }}: {{ formatDuration(elapsedSec) }}</span>
       <span>{{ t('etaLabel') }}: {{ etaSec ? formatDuration(etaSec) : 'n/a' }}</span>
