@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
 import { X } from 'lucide-vue-next'
 import { formatBytes, formatDuration, formatSpeed, progressPct } from '../../stores/app.js'
 import { t } from '../../lang/index.js'
@@ -36,6 +36,45 @@ const label = computed(() => {
 
 const heading = computed(() => props.title || props.progress?.title || props.progress?.stage || '')
 
+// The server sends elapsed and eta with a progress event, and between events a
+// quiet download would leave both frozen. Counting locally from the last update
+// keeps them moving without asking the server for anything
+const receivedAt = ref(Date.now())
+const now = ref(Date.now())
+let ticker = null
+
+watch(
+  () => props.progress?.elapsed_sec,
+  () => {
+    receivedAt.value = Date.now()
+    now.value = Date.now()
+  }
+)
+
+watch(
+  () => status.value === 'running',
+  (live) => {
+    clearInterval(ticker)
+    ticker = live ? setInterval(() => (now.value = Date.now()), 1000) : null
+  },
+  { immediate: true }
+)
+
+onUnmounted(() => clearInterval(ticker))
+
+const sinceUpdate = computed(() => Math.max(0, Math.floor((now.value - receivedAt.value) / 1000)))
+
+const elapsedSec = computed(() => {
+  const base = Number(props.progress?.elapsed_sec ?? 0)
+  return status.value === 'running' ? base + sinceUpdate.value : base
+})
+
+const etaSec = computed(() => {
+  const base = Number(props.progress?.eta_sec ?? 0)
+  if (!base) return 0
+  return status.value === 'running' ? Math.max(0, base - sinceUpdate.value) : base
+})
+
 const hasMeta = computed(
   () =>
     status.value === 'running' &&
@@ -68,8 +107,8 @@ const hasMeta = computed(
         {{ formatBytes(progress.downloaded_bytes) }} / {{ formatBytes(progress.total_bytes) }}
       </span>
       <span v-if="progress.speed_bps">{{ t('speedLabel') }}: {{ formatSpeed(progress.speed_bps) }}</span>
-      <span>{{ t('elapsedLabel') }}: {{ formatDuration(progress.elapsed_sec) }}</span>
-      <span v-if="progress.eta_sec">{{ t('etaLabel') }}: {{ formatDuration(progress.eta_sec) }}</span>
+      <span>{{ t('elapsedLabel') }}: {{ formatDuration(elapsedSec) }}</span>
+      <span v-if="etaSec">{{ t('etaLabel') }}: {{ formatDuration(etaSec) }}</span>
     </div>
     <div v-if="progress.message && status === 'running'" class="mt-1 truncate font-mono text-[11px] text-un1ca-muted">
       {{ progress.message }}
