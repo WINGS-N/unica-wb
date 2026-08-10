@@ -1292,8 +1292,11 @@ def run_build_job(job_id: str):
         flags = []
         if job.force:
             flags.append("--force")
-        if job.no_rom_zip:
-            flags.append("--no-rom-zip")
+        # The build script makes the target-files zip by default and the flashable
+        # one only when asked, so wanting a rom means passing a flag rather than
+        # withholding one
+        if not job.no_rom_zip:
+            flags.append("--build-rom-zip")
 
         short_commit = (job.source_commit or "unknown")[:8]
         version_suffix = (job.version_suffix or "").strip()
