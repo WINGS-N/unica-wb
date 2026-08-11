@@ -116,7 +116,7 @@ function openJobMods(job) {
           <button
             v-if="job.status === 'running' || job.status === 'queued'"
             type="button"
-            class="chip-button"
+            class="chip-button is-danger"
             @click.stop="openStopModal(job)"
           >
             <Octagon :size="14" /> {{ t('stop') }}
@@ -140,29 +140,44 @@ function openJobMods(job) {
           <button
             v-if="job.status === 'succeeded' && job.target_files_path"
             type="button"
-            class="chip-button"
+            class="chip-button is-accent"
             @click.stop="openIncrementalModal(job)"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
           </button>
-          <button v-if="job.status === 'failed'" type="button" class="chip-button" @click.stop="openHints(job)">
+          <button
+            v-if="job.status === 'failed'"
+            type="button"
+            class="chip-button is-warning"
+            @click.stop="openHints(job)"
+          >
             <CircleHelp :size="14" /> {{ t('whyBuildFailed') }}
           </button>
           <button v-if="parseJobMods(job).length" type="button" class="chip-button" @click.stop="openJobMods(job)">
             {{ t('mods') }} ({{ parseJobMods(job).length }})
           </button>
-          <button v-if="hasJobModsConfig(job)" type="button" class="chip-button" @click.stop="loadModsFromJob(job)">
+          <button
+            v-if="hasJobModsConfig(job)"
+            type="button"
+            class="chip-button is-info"
+            @click.stop="loadModsFromJob(job)"
+          >
             <ListChecks :size="14" /> {{ t('useModlist') }} ({{ parseJobModsDisabled(job).length }})
           </button>
           <button
             v-if="hasJobDebloatChanges(job)"
             type="button"
-            class="chip-button"
+            class="chip-button is-info"
             @click.stop="loadDebloatFromJob(job)"
           >
             <Trash2 :size="14" /> {{ t('loadDebloat') }} ({{ parseJobDebloatDisabled(job).length }})
           </button>
-          <button v-if="hasJobFFOverrides(job)" type="button" class="chip-button" @click.stop="loadFFFromJob(job)">
+          <button
+            v-if="hasJobFFOverrides(job)"
+            type="button"
+            class="chip-button is-info"
+            @click.stop="loadFFFromJob(job)"
+          >
             <Sparkles :size="14" /> {{ t('useFF') }} ({{ Object.keys(parseJobFFOverrides(job)).length }})
           </button>
         </div>

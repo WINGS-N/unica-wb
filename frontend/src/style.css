@@ -509,6 +509,39 @@
     color: theme('colors.un1ca.danger');
   }
 
+  .chip-button.is-warning {
+    color: theme('colors.un1ca.warning');
+    background: rgba(242, 193, 78, 0.14);
+    border-color: rgba(242, 193, 78, 0.42);
+  }
+
+  .chip-button.is-warning:hover {
+    background: rgba(242, 193, 78, 0.24);
+    color: theme('colors.un1ca.warning');
+  }
+
+  .chip-button.is-accent {
+    color: theme('colors.un1ca.badgeText');
+    background: rgba(18, 89, 209, 0.22);
+    border-color: rgba(18, 89, 209, 0.5);
+  }
+
+  .chip-button.is-accent:hover {
+    background: rgba(18, 89, 209, 0.32);
+    color: theme('colors.un1ca.badgeText');
+  }
+
+  .chip-button.is-info {
+    color: theme('colors.un1ca.badgeText');
+    background: theme('colors.un1ca.badgeBg');
+    border-color: rgba(140, 168, 255, 0.4);
+  }
+
+  .chip-button.is-info:hover {
+    background: rgba(140, 168, 255, 0.24);
+    color: theme('colors.un1ca.badgeText');
+  }
+
   /* The separator owns its spacing, so the markup carries no stray whitespace */
   .license-sep {
     @apply mx-2 inline-block text-un1ca-kicker;
