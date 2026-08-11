@@ -22,6 +22,15 @@ import {
   target
 } from '../stores/app.js'
 
+// Only a build carries a version, an operation artifact is named by what made it
+function artifactSubtitle(item) {
+  if (item.version_major === null || item.version_major === undefined) {
+    return item.operation_name || item.target
+  }
+  const suffix = item.version_suffix ? `-${item.version_suffix}` : ''
+  return `${item.target} - v${item.version_major}.${item.version_minor}.${item.version_patch}${suffix}`
+}
+
 function startLocalUpdate(item) {
   openLocalUpdate(item)
   openOverlay('localUpdate')
@@ -41,10 +50,8 @@ onMounted(fetchArtifacts)
       <article v-for="item in artifacts" :key="item.job_id" class="list-row">
         <div class="flex flex-wrap items-start justify-between gap-2">
           <div class="min-w-0 flex-1">
-            <p class="list-row-title">
-              {{ item.target }} - v{{ item.version_major }}.{{ item.version_minor }}.{{ item.version_patch
-              }}{{ item.version_suffix ? `-${item.version_suffix}` : '' }}
-            </p>
+            <p class="list-row-title wrap-anywhere">{{ item.name || item.job_id }}</p>
+            <p class="list-row-meta">{{ artifactSubtitle(item) }}</p>
             <p class="list-row-meta font-mono">{{ item.job_id }}</p>
             <p class="list-row-meta">{{ formatBytes(item.size_bytes) }} - {{ formatDateTime(item.finished_at) }}</p>
             <p v-if="item.target_files_exists" class="list-row-meta">
