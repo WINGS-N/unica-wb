@@ -46,6 +46,8 @@ import {
   firmwareStatus,
   firmwareStatusTone,
   force,
+  formatBytes,
+  formatDateTime,
   latestArtifactAvailable,
   loading,
   modsDisabledIds,
@@ -73,9 +75,18 @@ import {
   versionSuffix
 } from '../stores/app.js'
 
+// The file name alone is one long string of near identical builds, so the label
+// leads with when it was built
+function baseLabel(base) {
+  const version = String(base.name || '')
+    .replace(/^[^_]*_/, '')
+    .replace(/-target_files\.zip$/, '')
+  return [formatDateTime(base.finished_at), version, formatBytes(base.size)].filter(Boolean).join(' - ')
+}
+
 const incrementalBaseOptions = computed(() => [
   { value: '', label: t('incrementalBaseNone') },
-  ...incrementalBases.value.map((x) => ({ value: x.job_id, label: x.name }))
+  ...incrementalBases.value.map((x) => ({ value: x.job_id, label: baseLabel(x) }))
 ])
 
 onMounted(loadIncrementalBasesForTarget)
