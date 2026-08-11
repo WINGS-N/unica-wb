@@ -5,8 +5,8 @@ import { dismissToast, toasts } from '../../stores/toast.js'
 const SWIPE_THRESHOLD = 70
 const SWIPE_FADE_OVER = 220
 
-// Per-toast countdown, paused while the pointer rests on the toast so a message
-// cannot slip away from under the cursor
+// Per-toast countdown, paused while the pointer rests on a toast that can be
+// interacted with; plain toasts let clicks through to whatever they cover
 const timers = new Map()
 const drag = ref({})
 

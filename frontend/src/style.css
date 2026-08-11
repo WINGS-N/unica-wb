@@ -774,7 +774,7 @@
   }
 
   .toast {
-    @apply pointer-events-auto flex select-none items-center gap-2 text-[14px] leading-[1.35];
+    @apply pointer-events-none flex select-none items-center gap-2 text-[14px] leading-[1.35];
     /* The halo is tinted by what happened, brand blue being the neutral case */
     --toast-glow-a: rgba(18, 89, 209, 0.55);
     --toast-glow-b: rgba(93, 180, 255, 0.45);
@@ -808,7 +808,7 @@
   }
 
   .toast.is-rich {
-    @apply items-start;
+    @apply pointer-events-auto items-start;
   }
 
   .toast-body {
