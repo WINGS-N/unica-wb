@@ -400,5 +400,8 @@
   "artifactDeleted": "Artifact deleted",
   "artifactDeleteFailed": "Failed to delete the artifact",
   "flashableZip": "Flashable zip",
-  "targetFilesArchive": "target-files archive"
+  "targetFilesArchive": "target-files archive",
+  "incrementalBaseTitle": "Incremental update",
+  "incrementalBaseHint": "Pack the result as a difference against an earlier build, in the same run",
+  "incrementalBaseNone": "Full zip"
 }

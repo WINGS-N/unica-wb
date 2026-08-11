@@ -400,5 +400,8 @@
   "artifactDeleted": "Артефакт удалён",
   "artifactDeleteFailed": "Не удалось удалить артефакт",
   "flashableZip": "Прошивочный зип",
-  "targetFilesArchive": "Архив target-files"
+  "targetFilesArchive": "Архив target-files",
+  "incrementalBaseTitle": "Инкрементальное обновление",
+  "incrementalBaseHint": "Упаковать результат как разницу с ранней сборкой, в том же прогоне",
+  "incrementalBaseNone": "Полный зип"
 }

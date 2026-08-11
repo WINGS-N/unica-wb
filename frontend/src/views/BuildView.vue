@@ -22,7 +22,9 @@ import StatusPill from '../components/ui/StatusPill.vue'
 import { goTab, openOverlay } from '../stores/nav.js'
 import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
+import { onMounted, watch } from 'vue'
 import {
+  capabilities,
   changeTarget,
   clearUploadedMods,
   currentCommit,
@@ -47,6 +49,9 @@ import {
   latestArtifactAvailable,
   loading,
   modsDisabledIds,
+  incrementalBaseForBuild,
+  incrementalBases,
+  loadIncrementalBasesForTarget,
   noRomZip,
   skipTargetFiles,
   normalizeModelForImage,
@@ -67,6 +72,14 @@ import {
   versionPatch,
   versionSuffix
 } from '../stores/app.js'
+
+const incrementalBaseOptions = computed(() => [
+  { value: '', label: t('incrementalBaseNone') },
+  ...incrementalBases.value.map((x) => ({ value: x.job_id, label: x.name }))
+])
+
+onMounted(loadIncrementalBasesForTarget)
+watch(target, loadIncrementalBasesForTarget)
 
 const targetSelectOptions = computed(() =>
   targetOptions.value.map((item) => ({ value: item.code, label: `${item.code} - ${item.name}` }))
@@ -243,7 +256,7 @@ function latestZipHref() {
             <OneuiSwitch v-model="force" />
           </div>
         </div>
-        <div class="form-section">
+        <div v-if="capabilities.rom_zip" class="form-section">
           <div class="form-row">
             <div class="min-w-0">
               <p class="form-label">{{ t('skipRomZip') }}</p>
@@ -252,7 +265,7 @@ function latestZipHref() {
             <OneuiSwitch v-model="noRomZip" :disabled="skipTargetFiles" />
           </div>
         </div>
-        <div class="form-section">
+        <div v-if="capabilities.skip_target_files" class="form-section">
           <div class="form-row">
             <div class="min-w-0">
               <p class="form-label">{{ t('skipTargetFiles') }}</p>
@@ -260,6 +273,18 @@ function latestZipHref() {
             </div>
             <OneuiSwitch v-model="skipTargetFiles" />
           </div>
+        </div>
+        <div v-if="capabilities.incremental_zip && incrementalBases.length" class="form-section">
+          <p class="form-label">{{ t('incrementalBaseTitle') }}</p>
+          <p class="form-hint">{{ t('incrementalBaseHint') }}</p>
+          <OneuiSelect
+            block
+            class="mt-3"
+            :model-value="incrementalBaseForBuild"
+            :options="incrementalBaseOptions"
+            :disabled="skipTargetFiles"
+            @change="(v) => (incrementalBaseForBuild = v)"
+          />
         </div>
       </div>
 

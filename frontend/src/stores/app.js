@@ -45,6 +45,8 @@ export const versionSuffix = ref('')
 export const force = ref(false)
 export const noRomZip = ref(false)
 export const skipTargetFiles = ref(false)
+export const incrementalBaseForBuild = ref('')
+export const capabilities = ref({ incremental_zip: true, rom_zip: true, skip_target_files: true })
 
 export const jobs = ref([])
 export const jobsLoading = ref(false)
@@ -580,6 +582,7 @@ export function applyDefaults(data) {
   versionPatch.value = data.defaults?.version_patch ?? 0
   versionSuffix.value = data.defaults?.version_suffix || ''
   latestArtifactAvailable.value = Boolean(data.latest_artifact_available)
+  if (data.capabilities) capabilities.value = data.capabilities
   // Floating-feature defaults are per target; only drop the user's overrides
   // when the target actually changed under them
   if (targetChanged) {
@@ -700,7 +703,8 @@ export async function submitJob() {
         ff_overrides: ffOverridesCount.value ? ffOverrides.value : null,
         force: force.value,
         no_rom_zip: noRomZip.value,
-        skip_target_files: skipTargetFiles.value
+        skip_target_files: skipTargetFiles.value,
+        incremental_base_job_id: incrementalBaseForBuild.value || null
       }
     })
     selectedJob.value = job
@@ -1099,6 +1103,23 @@ export const incrementalForJob = ref(null)
 
 // Only builds of the same target that still have their target-files archive can
 // serve as a base for the difference
+export async function loadIncrementalBasesForTarget() {
+  incrementalBases.value = []
+  if (!capabilities.value.incremental_zip || !target.value) return
+  incrementalLoading.value = true
+  try {
+    const data = await apiFetch('/artifacts/target/files', { params: { target: target.value } })
+    incrementalBases.value = data.items || []
+    if (!incrementalBases.value.some((x) => x.job_id === incrementalBaseForBuild.value)) {
+      incrementalBaseForBuild.value = ''
+    }
+  } catch (e) {
+    reportError('failedIncremental', e)
+  } finally {
+    incrementalLoading.value = false
+  }
+}
+
 export async function openIncrementalModal(job) {
   incrementalForJob.value = job
   incrementalBases.value = []
