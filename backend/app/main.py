@@ -735,6 +735,7 @@ def _repo_capabilities(ws: WorkspaceRef) -> dict[str, bool]:
 
     return {
         "incremental_zip": offers("scripts/build_flashable_zip.sh", "--incremental"),
+        "incremental_from_dir": offers("scripts/build_flashable_zip.sh", "<file|dir>"),
         "rom_zip": offers("scripts/make_rom.sh", "--build-rom-zip"),
         "skip_target_files": offers("scripts/make_rom.sh", "--no-target-files"),
     }

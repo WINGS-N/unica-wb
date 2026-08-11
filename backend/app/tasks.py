@@ -816,6 +816,23 @@ def _target_config_value(root: Path, codename: str, key: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _accepts_target_dir(root: Path) -> bool:
+    # A fork whose wrapper only takes a zip has to be handed the zip, even though
+    # the very same files are sitting unpacked next to it
+    try:
+        return "<file|dir>" in (root / "scripts" / "build_flashable_zip.sh").read_text(errors="ignore")
+    except OSError:
+        return False
+
+
+def _built_target_dir(ctx: ws_lib.WorkspaceRef, target_codename: str) -> str:
+    # What the build packed the archive from, still unpacked where it left it
+    path = ctx.out / "target" / target_codename / "tmp"
+    if _accepts_target_dir(ctx.root) and (path / "build_info.txt").is_file():
+        return str(path)
+    return ""
+
+
 def _incremental_zip_cmd(root: Path, target_codename: str, base_path: str, target_files_path: str) -> str:
     # The generated config is a snapshot from whichever build ran last, and a key
     # added to the target afterwards is still "none" there. imgdiff needs the
@@ -1437,7 +1454,10 @@ def run_build_job(job_id: str):
         # options cannot be combined
         if job.skip_target_files:
             flags.append("--no-target-files")
-        elif not job.no_rom_zip:
+        elif not job.no_rom_zip and not job.incremental_base_job_id:
+            # Packing the full zip as well would spend an hour on an artifact the
+            # incremental one replaces, and it consumes the very directory the
+            # incremental step wants to take the target side from
             flags.append("--build-rom-zip")
 
         short_commit = (job.source_commit or "unknown")[:8]
@@ -1676,7 +1696,8 @@ def run_build_job(job_id: str):
                     base = db.get(BuildJob, job.incremental_base_job_id)
                     base_path = str(base.target_files_path or "") if base else ""
                     if base_path and Path(base_path).is_file():
-                        rc = _pack_incremental_zip(job_id, ctx, log_file, job.target, base_path, target_files)
+                        target_side = _built_target_dir(ctx, job.target) or target_files
+                        rc = _pack_incremental_zip(job_id, ctx, log_file, job.target, base_path, target_side)
                         db.refresh(job)
                         if rc == 0:
                             artifact = _pick_newest(ctx.out, "UN1CA_*INCREMENTAL*.zip", run_started_at)
