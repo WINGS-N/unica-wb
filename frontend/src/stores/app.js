@@ -13,7 +13,7 @@ import {
 } from './api.js'
 import { dismissToast, showToast } from './toast.js'
 import { confirm } from './confirm.js'
-import { t } from '../lang/index.js'
+import { language, t } from '../lang/index.js'
 
 const STORAGE_SELECTED_JOB = 'un1ca:selectedJobId'
 const STORAGE_LOG_TAIL_KB = 'un1ca:logTailKb'
@@ -264,11 +264,21 @@ export function formatDuration(sec) {
   return `${m}:${String(r).padStart(2, '0')}`
 }
 
+const DATE_TIME_FORMAT = {
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hourCycle: 'h23'
+}
+
 export function formatDateTime(value) {
   if (!value) return 'n/a'
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return String(value)
-  return date.toLocaleString()
+  return date.toLocaleString(language.value === 'ru' ? 'ru-RU' : 'en-GB', DATE_TIME_FORMAT)
 }
 
 export function targetDisplay(code) {
