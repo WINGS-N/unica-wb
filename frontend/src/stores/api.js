@@ -138,8 +138,8 @@ export function buildWsUrl(path, params = {}) {
   return `${origin}${API_PREFIX}${path}${qs ? `?${qs}` : ''}`
 }
 
-// Reconnecting websocket with capped exponential backoff. The old fixed 1.5s
-// retry hammered the server for as long as auth was rejected
+// Reconnecting websocket with capped exponential backoff, so a rejected auth
+// does not turn into a retry storm
 export function createReconnectingSocket({ path, params, onMessage, onOpen, onClose }) {
   let socket = null
   let timer = null
