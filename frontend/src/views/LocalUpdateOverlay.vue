@@ -1,5 +1,5 @@
 <script setup>
-import { computed } from 'vue'
+import { computed, onMounted } from 'vue'
 import { Download, Upload } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SectionCard from '../components/ui/SectionCard.vue'
@@ -16,7 +16,10 @@ import {
   localUpdatePhase,
   localUpdateResult,
   localUpdateRow,
+  localUpdateResumable,
   cancelLocalUpdate,
+  findResumable,
+  pickLocalBase,
   runLocalUpdate,
   setLocalUpdateFile
 } from '../stores/localupdate.js'
@@ -37,6 +40,19 @@ const saved = computed(() => formatBytes(Math.max(0, localUpdateBytes.value.tota
 function onFileChanged(event) {
   setLocalUpdateFile(event.target.files?.[0] || null)
 }
+
+// The picker hands back a handle that outlives the tab, an input element does not
+async function onPick(event) {
+  if (typeof window.showOpenFilePicker !== 'function') return
+  event.preventDefault()
+  try {
+    await pickLocalBase()
+  } catch {
+    // The dialog was dismissed
+  }
+}
+
+onMounted(() => findResumable(localUpdateRow.value))
 </script>
 
 <template>
@@ -45,7 +61,7 @@ function onFileChanged(event) {
       <p class="page-subtitle">{{ t('localUpdateHint') }}</p>
       <p v-if="localUpdateRow" class="list-row-meta font-mono">{{ localUpdateRow.target }}</p>
 
-      <label class="dropzone mt-3">
+      <label class="dropzone mt-3" @click="onPick">
         <Upload :size="22" class="shrink-0 text-un1ca-muted" />
         <span class="min-w-0 flex-1">
           <span class="block truncate text-[15px] font-bold">{{ localUpdateFile?.name || t('localUpdatePick') }}</span>
@@ -57,7 +73,18 @@ function onFileChanged(event) {
         <span class="chip-button shrink-0">{{ t('browse') }}</span>
       </label>
 
+      <p v-if="localUpdateResumable" class="form-hint mt-3">
+        {{ t('localUpdateResumeHint') }}: {{ localUpdateResumable.done }} / {{ localUpdateResumable.total }}
+      </p>
+
       <div class="actions-row">
+        <SamsungButton
+          v-if="localUpdateResumable && !localUpdateBusy"
+          variant="primary"
+          @click="runLocalUpdate(localUpdateResumable)"
+        >
+          {{ t('localUpdateResume') }}
+        </SamsungButton>
         <SamsungButton
           variant="primary"
           :loading="localUpdateBusy"

@@ -1,5 +1,6 @@
 import { computed, ref } from 'vue'
 import { apiFetch, downloadUrl } from './api.js'
+import { idbDelete, idbGet, idbSet } from './idb.js'
 
 // Blocks the server marks as changed are pulled with range requests, and several
 // neighbours travel together up to this much at a time
@@ -14,8 +15,12 @@ export const localUpdateError = ref('')
 export const localUpdateBlocks = ref({ done: 0, total: 0, reused: 0, fetched: 0 })
 export const localUpdateBytes = ref({ fetched: 0, total: 0 })
 export const localUpdateResult = ref(null)
+export const localUpdateResumable = ref(null)
 
 let canceller = null
+let baseHandle = null
+
+const sessionKey = (jobId) => `localUpdate:${jobId}`
 
 export const localUpdateBusy = computed(() => ['hashing', 'fetching', 'writing'].includes(localUpdatePhase.value))
 
@@ -38,10 +43,35 @@ export function cancelLocalUpdate() {
   if (canceller) canceller.abort()
 }
 
-export function setLocalUpdateFile(file) {
+export function setLocalUpdateFile(file, handle = null) {
   localUpdateFile.value = file || null
+  baseHandle = handle
   localUpdateResult.value = null
   localUpdateError.value = ''
+}
+
+export async function pickLocalBase() {
+  if (typeof window.showOpenFilePicker !== 'function') return false
+  const [handle] = await window.showOpenFilePicker({ multiple: false })
+  setLocalUpdateFile(await handle.getFile(), handle)
+  return true
+}
+
+// A tab that was closed halfway leaves the output file and the plan behind, and
+// both handles come back only after the user grants them again
+export async function findResumable(row) {
+  localUpdateResumable.value = null
+  const jobId = row?.id || row?.job_id
+  if (!jobId) return
+  const saved = await idbGet(sessionKey(jobId))
+  if (saved && saved.done > 0 && saved.done < saved.total) localUpdateResumable.value = saved
+}
+
+async function allowed(handle, mode) {
+  if (!handle) return false
+  const options = { mode }
+  if ((await handle.queryPermission?.(options)) === 'granted') return true
+  return (await handle.requestPermission?.(options)) === 'granted'
 }
 
 async function digestOf(buffer) {
@@ -52,14 +82,24 @@ async function digestOf(buffer) {
 
 // Chromium hands out a real file, everyone else writes into the origin private
 // area and gets the result as a download afterwards
-async function openWriter(name) {
+async function openWriter(name, resumeHandle = null, position = 0) {
+  const keep = { keepExistingData: position > 0 }
+  if (resumeHandle) {
+    const stream = await resumeHandle.createWritable(keep)
+    if (position) await stream.seek(position)
+    return { stream, kind: resumeHandle.kind === 'opfs' ? 'opfs' : 'disk', handle: resumeHandle }
+  }
   if (typeof window.showSaveFilePicker === 'function') {
     const handle = await window.showSaveFilePicker({ suggestedName: name })
-    return { stream: await handle.createWritable(), kind: 'disk', handle }
+    const stream = await handle.createWritable(keep)
+    if (position) await stream.seek(position)
+    return { stream, kind: 'disk', handle }
   }
   const root = await navigator.storage.getDirectory()
   const handle = await root.getFileHandle(name, { create: true })
-  return { stream: await handle.createWritable(), kind: 'opfs', handle }
+  const stream = await handle.createWritable(keep)
+  if (position) await stream.seek(position)
+  return { stream, kind: 'opfs', handle }
 }
 
 // A dropped connection mid transfer is the normal case on a long download, and
@@ -100,27 +140,45 @@ function planRanges(missing, blockSize, totalSize) {
   return groups
 }
 
-export async function runLocalUpdate() {
+export async function runLocalUpdate(resume = null) {
   const row = localUpdateRow.value
-  const file = localUpdateFile.value
-  if (!row || !file) return
+  if (!row) return
+  const jobId = row.id || row.job_id
 
   localUpdateError.value = ''
   localUpdateResult.value = null
   canceller = new AbortController()
-  const jobId = row.id || row.job_id
 
   try {
+    let file = localUpdateFile.value
+    let writer = null
+    let startBlock = 0
+
+    if (resume) {
+      if (!(await allowed(resume.base, 'read')) || !(await allowed(resume.out, 'readwrite'))) {
+        throw new Error('access to the saved files was not granted')
+      }
+      file = await resume.base.getFile()
+      baseHandle = resume.base
+      startBlock = resume.done
+    }
+    if (!file) return
+
     localUpdatePhase.value = 'hashing'
     const map = await apiFetch(`/jobs/${jobId}/artifact/blockmap`)
     const blockSize = Number(map.block_size)
     const wanted = map.blocks || []
-    localUpdateBlocks.value = { done: 0, total: wanted.length, reused: 0, fetched: 0 }
+    if (resume && (resume.total !== wanted.length || resume.size !== Number(map.size))) {
+      await idbDelete(sessionKey(jobId))
+      throw new Error('the artifact changed since the interrupted run')
+    }
+
+    localUpdateBlocks.value = { done: startBlock, total: wanted.length, reused: 0, fetched: 0 }
     localUpdateBytes.value = { fetched: 0, total: Number(map.size) }
 
     const missing = []
     const reusable = new Set()
-    for (let i = 0; i < wanted.length; i += 1) {
+    for (let i = startBlock; i < wanted.length; i += 1) {
       if (canceller.signal.aborted) throw new Error('canceled')
       const start = i * blockSize
       if (start < file.size) {
@@ -135,13 +193,24 @@ export async function runLocalUpdate() {
     }
 
     localUpdatePhase.value = 'fetching'
-    const writer = await openWriter(map.name)
+    writer = await openWriter(map.name, resume?.out || null, startBlock * blockSize)
     const url = downloadUrl(`/jobs/${jobId}/artifact`)
     const groups = planRanges(missing, blockSize, Number(map.size))
     const pending = new Map(groups.map((g) => [g.firstIndex, g]))
 
+    const remember = (done) =>
+      idbSet(sessionKey(jobId), {
+        jobId,
+        done,
+        total: wanted.length,
+        size: Number(map.size),
+        name: map.name,
+        base: baseHandle,
+        out: writer.handle
+      })
+
     try {
-      for (let i = 0; i < wanted.length; i += 1) {
+      for (let i = startBlock; i < wanted.length; i += 1) {
         let data
         if (reusable.has(i)) {
           const start = i * blockSize
@@ -167,15 +236,18 @@ export async function runLocalUpdate() {
         }
         await writer.stream.write(data)
         localUpdateBlocks.value = { ...localUpdateBlocks.value, done: i + 1 }
+        if ((i + 1) % 4 === 0) await remember(i + 1)
       }
 
       localUpdatePhase.value = 'writing'
       await writer.stream.close()
+      await idbDelete(sessionKey(jobId))
+      localUpdateResumable.value = null
     } catch (error) {
       try {
-        await writer.stream.abort()
+        await writer?.stream.close()
       } catch {
-        // The stream is already gone, nothing left to undo
+        // Closing a stream that already failed changes nothing
       }
       throw error
     }
@@ -191,6 +263,7 @@ export async function runLocalUpdate() {
     const canceled = canceller?.signal.aborted || String(error?.message || '') === 'canceled'
     localUpdateError.value = canceled ? '' : String(error?.message || error)
     localUpdatePhase.value = canceled ? 'idle' : 'error'
+    if (canceled) await findResumable(row)
   } finally {
     canceller = null
   }

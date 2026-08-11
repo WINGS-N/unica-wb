@@ -434,5 +434,7 @@
   "localUpdateReused": "Взято из вашей копии",
   "localUpdateDownloaded": "Скачано",
   "localUpdateSaved": "Не скачивалось",
-  "localUpdateSave": "Сохранить файл"
+  "localUpdateSave": "Сохранить файл",
+  "localUpdateResume": "Продолжить",
+  "localUpdateResumeHint": "Найден прерванный прогон, записано блоков"
 }

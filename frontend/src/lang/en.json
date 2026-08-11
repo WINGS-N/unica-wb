@@ -434,5 +434,7 @@
   "localUpdateReused": "Taken from your copy",
   "localUpdateDownloaded": "Downloaded",
   "localUpdateSaved": "Not downloaded",
-  "localUpdateSave": "Save the file"
+  "localUpdateSave": "Save the file",
+  "localUpdateResume": "Resume",
+  "localUpdateResumeHint": "Interrupted run found, blocks written"
 }
