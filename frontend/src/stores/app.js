@@ -1120,6 +1120,32 @@ export const incrementalForJob = ref(null)
 
 // Only builds of the same target that still have their target-files archive can
 // serve as a base for the difference
+export const retention = ref({ rom_zips: 0, target_files: 0 })
+export const retentionBusy = ref(false)
+
+export async function fetchRetention() {
+  try {
+    retention.value = await apiFetch('/settings/retention', { skipWorkspace: true })
+  } catch (e) {
+    reportError('retentionLoadFailed', e)
+  }
+}
+
+export async function saveRetention(patch) {
+  retentionBusy.value = true
+  try {
+    const data = await apiFetch('/settings/retention', { method: 'PATCH', json: patch, skipWorkspace: true })
+    retention.value = { rom_zips: data.rom_zips, target_files: data.target_files }
+    const removed = (data.removed?.rom_zips || 0) + (data.removed?.target_files || 0)
+    showToast(removed ? `${t('retentionApplied')}: ${removed}` : t('saved'), 'success')
+    await fetchArtifacts()
+  } catch (e) {
+    reportError('retentionSaveFailed', e)
+  } finally {
+    retentionBusy.value = false
+  }
+}
+
 export async function queueDsuPackage(row) {
   const id = row.id || row.job_id
   try {

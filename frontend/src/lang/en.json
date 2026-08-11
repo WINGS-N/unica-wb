@@ -406,5 +406,14 @@
   "incrementalBaseNone": "Full zip",
   "dsuPackage": "DSU",
   "dsuQueued": "DSU package queued",
-  "failedDsu": "Failed to pack the DSU package"
+  "failedDsu": "Failed to pack the DSU package",
+  "retentionTitle": "Artifact retention",
+  "retentionHint": "How many of the newest artifacts to keep per device, older ones are removed from disk",
+  "retentionRom": "Flashable zips",
+  "retentionTargetFiles": "target-files archives",
+  "retentionUnlimited": "Keep all",
+  "retentionApplied": "Removed",
+  "retentionLoadFailed": "Failed to load the retention settings",
+  "retentionSaveFailed": "Failed to save the retention settings",
+  "saved": "Saved"
 }

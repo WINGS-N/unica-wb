@@ -406,5 +406,14 @@
   "incrementalBaseNone": "Полный зип",
   "dsuPackage": "DSU",
   "dsuQueued": "DSU-пакет поставлен в очередь",
-  "failedDsu": "Не удалось собрать DSU-пакет"
+  "failedDsu": "Не удалось собрать DSU-пакет",
+  "retentionTitle": "Хранение артефактов",
+  "retentionHint": "Сколько последних артефактов держать на каждое устройство, остальные удаляются с диска",
+  "retentionRom": "Прошивочные зипы",
+  "retentionTargetFiles": "Архивы target-files",
+  "retentionUnlimited": "Хранить все",
+  "retentionApplied": "Удалено",
+  "retentionLoadFailed": "Не удалось загрузить настройки хранения",
+  "retentionSaveFailed": "Не удалось сохранить настройки хранения",
+  "saved": "Сохранено"
 }

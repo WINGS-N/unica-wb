@@ -48,6 +48,10 @@ import {
   requestAdvancedSave,
   resources,
   resourcesLoading,
+  retention,
+  retentionBusy,
+  fetchRetention,
+  saveRetention,
   saveRepoCredentials,
   setPassword,
   workspaces
@@ -86,7 +90,13 @@ function toggleTarget(code) {
   requestAdvancedSave()
 }
 
+const retentionOptions = computed(() => [
+  { value: '0', label: t('retentionUnlimited') },
+  ...[1, 2, 3, 5, 10].map((n) => ({ value: String(n), label: String(n) }))
+])
+
 onMounted(() => {
+  fetchRetention()
   watchResources()
   fetchAdvancedSettings()
   refreshPushState()
@@ -272,6 +282,26 @@ onBeforeUnmount(unwatchResources)
           </SamsungButton>
         </div>
       </template>
+    </SectionCard>
+
+    <SectionCard :title="t('retentionTitle')" :subtitle="t('retentionHint')" :loading="retentionBusy">
+      <div class="form-section">
+        <OneuiSelect
+          block
+          :label="t('retentionRom')"
+          :model-value="String(retention.rom_zips)"
+          :options="retentionOptions"
+          @change="(v) => saveRetention({ rom_zips: Number(v) })"
+        />
+        <OneuiSelect
+          block
+          class="mt-3"
+          :label="t('retentionTargetFiles')"
+          :model-value="String(retention.target_files)"
+          :options="retentionOptions"
+          @change="(v) => saveRetention({ target_files: Number(v) })"
+        />
+      </div>
     </SectionCard>
 
     <SectionCard :title="t('resourcesTitle')">
