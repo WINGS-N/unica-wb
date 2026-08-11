@@ -722,6 +722,24 @@ def _get_target_options(ws: WorkspaceRef) -> list[dict[str, str]]:
     return options
 
 
+def _repo_capabilities(ws: WorkspaceRef) -> dict[str, bool]:
+    # Forks of the firmware sources differ in what their build scripts accept, so
+    # the panel asks the checkout instead of assuming its own upstream
+    root = _project_root(ws) or Path(ws.root)
+
+    def offers(rel: str, flag: str) -> bool:
+        try:
+            return flag in (root / rel).read_text(errors="ignore")
+        except OSError:
+            return False
+
+    return {
+        "incremental_zip": offers("scripts/build_flashable_zip.sh", "--incremental"),
+        "rom_zip": offers("scripts/make_rom.sh", "--build-rom-zip"),
+        "skip_target_files": offers("scripts/make_rom.sh", "--no-target-files"),
+    }
+
+
 def _get_defaults_for_target(ws: WorkspaceRef, target: str) -> dict[str, str | int]:
     root = _project_root(ws) or Path(ws.root)
     preferred = _preferred_source_configs_for_target(root, target)
@@ -1850,6 +1868,7 @@ async def build_defaults(target: str | None = None, workspace: str | None = None
     return {
         "target": selected,
         "defaults": defaults,
+        "capabilities": await asyncio.to_thread(_repo_capabilities, ws),
         "latest_artifact_available": await asyncio.to_thread(
             _target_has_latest_artifact_with_new_session, ws.id, selected
         ),
@@ -2179,6 +2198,7 @@ def _state_section(section: str, workspace_id: str | None, target: str | None) -
         return {
             "target": selected,
             "defaults": defaults,
+            "capabilities": _repo_capabilities(ws),
             "latest_artifact_available": _target_has_latest_artifact_with_new_session(ws.id, selected),
         }
 
