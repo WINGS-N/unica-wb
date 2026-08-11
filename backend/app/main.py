@@ -738,6 +738,7 @@ def _repo_capabilities(ws: WorkspaceRef) -> dict[str, bool]:
         "incremental_from_dir": offers("scripts/build_flashable_zip.sh", "<file|dir>"),
         "rom_zip": offers("scripts/make_rom.sh", "--build-rom-zip"),
         "skip_target_files": offers("scripts/make_rom.sh", "--no-target-files"),
+        "dsu_package": (root / "scripts" / "internal" / "create_target_files_zip.sh").is_file(),
     }
 
 
@@ -2455,6 +2456,32 @@ async def queue_incremental_zip(
         "incremental_zip_job_task",
         op_job.id,
         str(base.target_files_path),
+        str(job.target_files_path),
+        job.target,
+    )
+    db.commit()
+    db.refresh(op_job)
+    return op_job
+
+
+@app.post(f"{settings.api_prefix}/jobs/{{job_id}}/dsu", response_model=BuildJobRead)
+async def queue_dsu_package(job_id: str, workspace: str | None = None, db: Session = Depends(get_db)):
+    ws = _require_ws(db, workspace)
+    job = db.get(BuildJob, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if not job.target_files_path or not Path(str(job.target_files_path)).is_file():
+        raise HTTPException(400, "Target-files zip is not available for this build")
+
+    op_job = _create_operation_job(
+        db,
+        workspace_id=ws.id,
+        target=job.target,
+        operation_name=f"DSU package: {job.target} from {Path(str(job.target_files_path)).name}",
+    )
+    op_job.queue_job_id = await _enqueue_build(
+        "dsu_package_job_task",
+        op_job.id,
         str(job.target_files_path),
         job.target,
     )

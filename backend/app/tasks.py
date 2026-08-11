@@ -894,6 +894,75 @@ def _pack_incremental_zip(
             _set_job_pid(job_id, None)
 
 
+DSU_IMAGES = ("system.img", "product.img")
+
+
+def run_dsu_package_job(job_id: str, target_files_path: str, target_codename: str):
+    # A DSU package is just the two images the dynamic system loader maps over
+    # the installed ones, so it is repacked from what the build already produced
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        built = ctx.out / "target" / target_codename / "tmp"
+        source = "built" if all((built / name).is_file() for name in DSU_IMAGES) else "zip"
+        stem = Path(target_files_path).name.replace("-target_files.zip", "")
+        output = ctx.out / f"DSU_{stem}.zip"
+        images = " ".join(DSU_IMAGES)
+
+        if source == "built":
+            pack = f"cd {shlex.quote(str(built))} && 7z a -tzip -mx=0 -mmt=$(nproc) {shlex.quote(str(output))} {images}"
+        else:
+            stage = ctx.out / "target" / target_codename / "dsu-stage"
+            pack = (
+                f"rm -rf {shlex.quote(str(stage))} && mkdir -p {shlex.quote(str(stage))} && "
+                f"unzip -o {shlex.quote(target_files_path)} {images} -d {shlex.quote(str(stage))} && "
+                f"cd {shlex.quote(str(stage))} && "
+                f"7z a -tzip -mx=0 -mmt=$(nproc) {shlex.quote(str(output))} {images} && "
+                f"rm -rf {shlex.quote(str(stage))}"
+            )
+
+        cmd = f"rm -f {shlex.quote(str(output))} && {pack}"
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        with log_file.open("ab") as lf:
+            lf.write(f"[dsu] images from {source}, output {output.name}\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+            _set_job_pid(job_id, proc.pid)
+            assert proc.stdout
+            try:
+                while True:
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
+                        break
+                    lf.write(raw)
+                    lf.flush()
+                rc = proc.wait()
+                db = SessionLocal()
+                try:
+                    canceled = _job_status(db, job_id) == "canceled"
+                    if rc == 0 and not canceled and output.is_file():
+                        row = db.get(BuildJob, job_id)
+                        if row:
+                            row.artifact_path = str(output)
+                            db.commit()
+                finally:
+                    db.close()
+                if rc != 0 and not canceled:
+                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+            finally:
+                _set_job_pid(job_id, None)
+                _invalidate_dir_size_cache_paths([ctx.out])
+
+    _run_operation_job(job_id, _op)
+
+
 def run_incremental_zip_job(job_id: str, base_path: str, target_files_path: str, target_codename: str):
     # Packs the difference between two builds that already exist, so nothing has
     # to be rebuilt to change which one the update is measured against
