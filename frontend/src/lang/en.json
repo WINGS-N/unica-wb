@@ -403,5 +403,8 @@
   "targetFilesArchive": "target-files archive",
   "incrementalBaseTitle": "Incremental update",
   "incrementalBaseHint": "Pack the result as a difference against an earlier build, in the same run",
-  "incrementalBaseNone": "Full zip"
+  "incrementalBaseNone": "Full zip",
+  "dsuPackage": "DSU",
+  "dsuQueued": "DSU package queued",
+  "failedDsu": "Failed to pack the DSU package"
 }

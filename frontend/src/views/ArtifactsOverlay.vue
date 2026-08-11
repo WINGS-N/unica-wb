@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted } from 'vue'
-import { Download, Layers, Trash2 } from 'lucide-vue-next'
+import { Download, Layers, PackageOpen, Trash2 } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -8,12 +8,14 @@ import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
 import {
   artifacts,
+  capabilities,
   artifactsLoading,
   fetchArtifacts,
   formatBytes,
   formatDateTime,
   openDeleteArtifactModal,
   openIncrementalModal,
+  queueDsuPackage,
   target
 } from '../stores/app.js'
 
@@ -54,6 +56,14 @@ onMounted(fetchArtifacts)
             @click="openIncrementalModal({ id: item.job_id, target: item.target })"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+          <button
+            v-if="capabilities.dsu_package && item.target_files_exists"
+            type="button"
+            class="chip-button is-accent"
+            @click="queueDsuPackage(item)"
+          >
+            <PackageOpen :size="14" /> {{ t('dsuPackage') }}
           </button>
           <button
             v-if="item.exists || item.target_files_exists"

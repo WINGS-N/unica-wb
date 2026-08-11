@@ -403,5 +403,8 @@
   "targetFilesArchive": "Архив target-files",
   "incrementalBaseTitle": "Инкрементальное обновление",
   "incrementalBaseHint": "Упаковать результат как разницу с ранней сборкой, в том же прогоне",
-  "incrementalBaseNone": "Полный зип"
+  "incrementalBaseNone": "Полный зип",
+  "dsuPackage": "DSU",
+  "dsuQueued": "DSU-пакет поставлен в очередь",
+  "failedDsu": "Не удалось собрать DSU-пакет"
 }

@@ -1,6 +1,6 @@
 <script setup>
 import { computed } from 'vue'
-import { CircleHelp, Download, Layers, ListChecks, Octagon, Sparkles, Trash2 } from 'lucide-vue-next'
+import { CircleHelp, Download, Layers, ListChecks, Octagon, PackageOpen, Sparkles, Trash2 } from 'lucide-vue-next'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import ProgressBar from '../components/ui/ProgressBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -10,6 +10,7 @@ import { downloadUrl } from '../stores/api.js'
 import { goTab, openOverlay } from '../stores/nav.js'
 import {
   buildProgress,
+  capabilities,
   filteredJobs,
   formatDateTime,
   hasJobDebloatChanges,
@@ -31,6 +32,7 @@ import {
   parseJobDebloatDisabled,
   parseJobFFOverrides,
   parseJobModsDisabled,
+  queueDsuPackage,
   selectJob,
   selectedJob,
   targetOptions
@@ -144,6 +146,14 @@ function openJobMods(job) {
             @click.stop="openIncrementalModal(job)"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+          <button
+            v-if="capabilities.dsu_package && job.status === 'succeeded' && job.target_files_path"
+            type="button"
+            class="chip-button is-accent"
+            @click.stop="queueDsuPackage(job)"
+          >
+            <PackageOpen :size="14" /> {{ t('dsuPackage') }}
           </button>
           <button
             v-if="job.status === 'failed'"

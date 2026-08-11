@@ -1120,6 +1120,18 @@ export const incrementalForJob = ref(null)
 
 // Only builds of the same target that still have their target-files archive can
 // serve as a base for the difference
+export async function queueDsuPackage(row) {
+  const id = row.id || row.job_id
+  try {
+    const created = await apiFetch(`/jobs/${id}/dsu`, { method: 'POST' })
+    showToast(t('dsuQueued'), 'success')
+    await fetchJobs()
+    if (created) selectJob(created)
+  } catch (e) {
+    reportError('failedDsu', e)
+  }
+}
+
 export async function loadIncrementalBasesForTarget() {
   incrementalBases.value = []
   if (!capabilities.value.incremental_zip || !target.value) return
