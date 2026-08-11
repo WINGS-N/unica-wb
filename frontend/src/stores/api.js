@@ -54,6 +54,10 @@ export function downloadUrl(path, params = {}, options = {}) {
 // to, which is a state of the whole backend rather than of one request
 const UNAVAILABLE_STATUSES = new Set([502, 503, 504])
 
+// The server pings every 20s on every stream
+const SOCKET_STALE_AFTER_MS = 60000
+const SOCKET_WATCHDOG_MS = 10000
+
 export class ApiError extends Error {
   constructor(message, status) {
     super(message)
@@ -139,8 +143,33 @@ export function buildWsUrl(path, params = {}) {
 export function createReconnectingSocket({ path, params, onMessage, onOpen, onClose }) {
   let socket = null
   let timer = null
+  let watchdog = null
   let attempt = 0
   let stopped = false
+  let lastSeenAt = 0
+
+  // Anything between the browser and the server can drop a connection without
+  // sending a close frame, and the socket then stays OPEN forever with nothing
+  // arriving on it. The server pings, so silence past this long means dead
+  function isStale() {
+    return lastSeenAt > 0 && Date.now() - lastSeenAt > SOCKET_STALE_AFTER_MS
+  }
+
+  function reopen() {
+    if (stopped || !socket) return
+    socket.onclose = null
+    socket.close()
+    socket = null
+    // The fresh attempt gets a full window of its own before it counts as stale
+    lastSeenAt = Date.now()
+    if (onClose) onClose()
+    connect()
+  }
+
+  function onWake() {
+    if (document.visibilityState !== 'visible') return
+    if (isStale()) reopen()
+  }
 
   function connect() {
     if (stopped) return
@@ -148,16 +177,19 @@ export function createReconnectingSocket({ path, params, onMessage, onOpen, onCl
     socket = new WebSocket(buildWsUrl(path, params))
     socket.onopen = () => {
       attempt = 0
+      lastSeenAt = Date.now()
       if (onOpen) onOpen()
     }
     socket.onmessage = (event) => {
+      lastSeenAt = Date.now()
       let payload = null
       try {
         payload = JSON.parse(event.data)
       } catch {
         return
       }
-      if (payload) onMessage(payload)
+      if (!payload || payload.type === 'ping') return
+      onMessage(payload)
     }
     socket.onclose = (event) => {
       socket = null
@@ -173,6 +205,11 @@ export function createReconnectingSocket({ path, params, onMessage, onOpen, onCl
   }
 
   connect()
+  watchdog = setInterval(() => {
+    if (!stopped && isStale()) reopen()
+  }, SOCKET_WATCHDOG_MS)
+  document.addEventListener('visibilitychange', onWake)
+  window.addEventListener('online', onWake)
 
   return {
     isOpen() {
@@ -187,6 +224,10 @@ export function createReconnectingSocket({ path, params, onMessage, onOpen, onCl
       stopped = true
       if (timer) clearTimeout(timer)
       timer = null
+      if (watchdog) clearInterval(watchdog)
+      watchdog = null
+      document.removeEventListener('visibilitychange', onWake)
+      window.removeEventListener('online', onWake)
       if (socket && typeof socket.close === 'function') socket.close()
       socket = null
     },
@@ -197,6 +238,14 @@ export function createReconnectingSocket({ path, params, onMessage, onOpen, onCl
       if (socket && typeof socket.close === 'function') socket.close()
       socket = null
       stopped = false
+      lastSeenAt = Date.now()
+      if (!watchdog) {
+        watchdog = setInterval(() => {
+          if (!stopped && isStale()) reopen()
+        }, SOCKET_WATCHDOG_MS)
+        document.addEventListener('visibilitychange', onWake)
+        window.addEventListener('online', onWake)
+      }
       connect()
     }
   }
