@@ -806,12 +806,36 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw
     _run_operation_job(job_id, _op)
 
 
+def _target_config_value(root: Path, codename: str, key: str) -> str:
+    path = root / "target" / codename / "config.sh"
+    try:
+        text = path.read_text(errors="ignore")
+    except OSError:
+        return ""
+    match = re.search(rf"^{re.escape(key)}=\"?([^\"\n]*)\"?", text, re.MULTILINE)
+    return match.group(1).strip() if match else ""
+
+
 def run_incremental_zip_job(job_id: str, base_path: str, target_files_path: str, target_codename: str):
     # Packs the difference between two builds that already exist, so nothing has
     # to be rebuilt to change which one the update is measured against
     def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        # The generated config is a snapshot from whichever build ran last, and a
+        # key added to the target afterwards is still "none" there. imgdiff needs
+        # the cache size to bound a patch, and that size describes the device
+        # rather than the images being packed, so it is safe to refresh
+        refresh = ""
+        cache_size = _target_config_value(ctx.root, target_codename, "TARGET_CACHE_PARTITION_SIZE")
+        if cache_size:
+            refresh = (
+                "sed -i "
+                + shlex.quote(f"s|^TARGET_CACHE_PARTITION_SIZE=.*|TARGET_CACHE_PARTITION_SIZE={_sh_dq(cache_size)}|")
+                + " out/config.sh && "
+            )
+
         cmd = (
             f"cd {shlex.quote(str(ctx.root))} && "
+            f"{refresh}"
             f"source buildenv.sh {shlex.quote(target_codename)} && "
             f"scripts/build_flashable_zip.sh --incremental {shlex.quote(base_path)} "
             f"{shlex.quote(target_files_path)}"
