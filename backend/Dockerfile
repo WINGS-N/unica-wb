@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl \
     git \
     tini \
+    zstd \
     && rm -rf /var/lib/apt/lists/*
 
 RUN git config --global user.name "UN1CA Builder" && \

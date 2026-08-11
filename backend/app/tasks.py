@@ -920,6 +920,61 @@ def _pack_incremental_zip(
 
 
 DSU_IMAGES = ("system.img", "product.img")
+# A 128 MB window keeps the memory a client needs bounded, and the images differ
+# locally enough that a wider one buys almost nothing
+DELTA_WINDOW_LOG = 27
+
+
+def run_delta_patch_job(job_id: str, base_path: str, target_path: str):
+    # Ships the difference between two artifacts the user may already hold, so a
+    # rebuilt image costs a few megabytes instead of several gigabytes
+    def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
+        output = ctx.out / f"{Path(target_path).stem}.from-{Path(base_path).stem}.zst"
+        cmd = (
+            f"zstd -3 --long={DELTA_WINDOW_LOG} -f "
+            f"--patch-from={shlex.quote(base_path)} {shlex.quote(target_path)} -o {shlex.quote(str(output))}"
+        )
+        env = os.environ.copy()
+        env.setdefault("PYTHONUNBUFFERED", "1")
+        with log_file.open("ab") as lf:
+            lf.write(f"[delta] base={Path(base_path).name} target={Path(target_path).name}\n".encode())
+            lf.flush()
+            proc = subprocess.Popen(
+                ["bash", "-lc", cmd],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env=env,
+                text=True,
+                bufsize=0,
+                preexec_fn=os.setsid,
+            )
+            _set_job_pid(job_id, proc.pid)
+            assert proc.stdout
+            try:
+                while True:
+                    raw = os.read(proc.stdout.fileno(), 4096)
+                    if not raw:
+                        break
+                    lf.write(raw)
+                    lf.flush()
+                rc = proc.wait()
+                db = SessionLocal()
+                try:
+                    canceled = _job_status(db, job_id) == "canceled"
+                    if rc == 0 and not canceled and output.is_file():
+                        row = db.get(BuildJob, job_id)
+                        if row:
+                            row.artifact_path = str(output)
+                            db.commit()
+                finally:
+                    db.close()
+                if rc != 0 and not canceled:
+                    raise subprocess.CalledProcessError(rc, ["bash", "-lc", cmd])
+            finally:
+                _set_job_pid(job_id, None)
+                _invalidate_dir_size_cache_paths([ctx.out])
+
+    _run_operation_job(job_id, _op)
 
 
 def run_dsu_package_job(job_id: str, target_files_path: str, target_codename: str):
