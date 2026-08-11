@@ -5,6 +5,7 @@ import { apiFetch, downloadUrl } from './api.js'
 // neighbours travel together up to this much at a time
 const MAX_RANGE_BYTES = 64 * 1024 * 1024
 const DIGEST_CHARS = 64
+const RANGE_ATTEMPTS = 4
 
 export const localUpdateRow = ref(null)
 export const localUpdateFile = ref(null)
@@ -13,6 +14,8 @@ export const localUpdateError = ref('')
 export const localUpdateBlocks = ref({ done: 0, total: 0, reused: 0, fetched: 0 })
 export const localUpdateBytes = ref({ fetched: 0, total: 0 })
 export const localUpdateResult = ref(null)
+
+let canceller = null
 
 export const localUpdateBusy = computed(() => ['hashing', 'fetching', 'writing'].includes(localUpdatePhase.value))
 
@@ -29,6 +32,10 @@ export function openLocalUpdate(row) {
   localUpdateBlocks.value = { done: 0, total: 0, reused: 0, fetched: 0 }
   localUpdateBytes.value = { fetched: 0, total: 0 }
   localUpdateResult.value = null
+}
+
+export function cancelLocalUpdate() {
+  if (canceller) canceller.abort()
 }
 
 export function setLocalUpdateFile(file) {
@@ -55,6 +62,27 @@ async function openWriter(name) {
   return { stream: await handle.createWritable(), kind: 'opfs', handle }
 }
 
+// A dropped connection mid transfer is the normal case on a long download, and
+// a range request is cheap to repeat
+async function fetchRange(url, start, end, signal) {
+  let lastError = null
+  for (let attempt = 0; attempt < RANGE_ATTEMPTS; attempt += 1) {
+    if (signal.aborted) throw new Error('canceled')
+    try {
+      const response = await fetch(url, { headers: { Range: `bytes=${start}-${end - 1}` }, signal })
+      if (!response.ok && response.status !== 206) {
+        throw new Error(`range request failed with ${response.status}`)
+      }
+      return new Uint8Array(await response.arrayBuffer())
+    } catch (error) {
+      if (signal.aborted) throw error
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt))
+    }
+  }
+  throw lastError
+}
+
 function planRanges(missing, blockSize, totalSize) {
   const groups = []
   for (const index of missing) {
@@ -79,6 +107,7 @@ export async function runLocalUpdate() {
 
   localUpdateError.value = ''
   localUpdateResult.value = null
+  canceller = new AbortController()
   const jobId = row.id || row.job_id
 
   try {
@@ -92,6 +121,7 @@ export async function runLocalUpdate() {
     const missing = []
     const reusable = new Set()
     for (let i = 0; i < wanted.length; i += 1) {
+      if (canceller.signal.aborted) throw new Error('canceled')
       const start = i * blockSize
       if (start < file.size) {
         const slice = await file.slice(start, Math.min(start + blockSize, file.size)).arrayBuffer()
@@ -119,11 +149,7 @@ export async function runLocalUpdate() {
         } else {
           const group = pending.get(i)
           if (group) {
-            const response = await fetch(url, { headers: { Range: `bytes=${group.start}-${group.end - 1}` } })
-            if (!response.ok && response.status !== 206) {
-              throw new Error(`range request failed with ${response.status}`)
-            }
-            group.buffer = new Uint8Array(await response.arrayBuffer())
+            group.buffer = await fetchRange(url, group.start, group.end, canceller.signal)
             localUpdateBytes.value = {
               ...localUpdateBytes.value,
               fetched: localUpdateBytes.value.fetched + group.buffer.byteLength
@@ -162,7 +188,10 @@ export async function runLocalUpdate() {
     }
     localUpdatePhase.value = 'done'
   } catch (error) {
-    localUpdateError.value = String(error?.message || error)
-    localUpdatePhase.value = 'error'
+    const canceled = canceller?.signal.aborted || String(error?.message || '') === 'canceled'
+    localUpdateError.value = canceled ? '' : String(error?.message || error)
+    localUpdatePhase.value = canceled ? 'idle' : 'error'
+  } finally {
+    canceller = null
   }
 }

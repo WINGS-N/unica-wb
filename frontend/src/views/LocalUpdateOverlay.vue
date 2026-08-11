@@ -16,6 +16,7 @@ import {
   localUpdatePhase,
   localUpdateResult,
   localUpdateRow,
+  cancelLocalUpdate,
   runLocalUpdate,
   setLocalUpdateFile
 } from '../stores/localupdate.js'
@@ -64,6 +65,9 @@ function onFileChanged(event) {
           @click="runLocalUpdate"
         >
           {{ t('localUpdateStart') }}
+        </SamsungButton>
+        <SamsungButton v-if="localUpdateBusy" variant="danger" @click="cancelLocalUpdate">
+          {{ t('cancel') }}
         </SamsungButton>
       </div>
     </SectionCard>
