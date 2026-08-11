@@ -50,7 +50,7 @@ onMounted(fetchArtifacts)
           <button
             v-if="item.target_files_exists"
             type="button"
-            class="chip-button"
+            class="chip-button is-accent"
             @click="openIncrementalModal({ id: item.job_id, target: item.target })"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}

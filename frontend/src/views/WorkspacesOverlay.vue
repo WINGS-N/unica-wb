@@ -154,7 +154,7 @@ onMounted(fetchWorkspaces)
           <button type="button" class="chip-button" @click.stop="openEdit(ws)">
             <Pencil :size="14" /> {{ t('edit') }}
           </button>
-          <button v-if="workspaces.length > 1" type="button" class="chip-button" @click.stop="remove(ws)">
+          <button v-if="workspaces.length > 1" type="button" class="chip-button is-danger" @click.stop="remove(ws)">
             <Trash2 :size="14" /> {{ t('delete') }}
           </button>
         </div>

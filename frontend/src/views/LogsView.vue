@@ -69,12 +69,17 @@ function openHints() {
       >
         {{ t('followLogs') }}
       </button>
-      <button v-if="selectedJob?.status === 'failed'" type="button" class="chip-button self-end" @click="openHints">
+      <button
+        v-if="selectedJob?.status === 'failed'"
+        type="button"
+        class="chip-button is-warning self-end"
+        @click="openHints"
+      >
         <CircleHelp :size="14" /> {{ t('whyBuildFailed') }}
       </button>
       <a
         v-if="selectedJob?.artifact_path"
-        class="chip-button self-end"
+        class="chip-button is-success self-end"
         :href="downloadUrl(`/jobs/${selectedJob.id}/artifact`)"
       >
         <Download :size="14" /> {{ t('downloadZip') }}
