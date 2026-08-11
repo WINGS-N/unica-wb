@@ -5,6 +5,7 @@ import {
   Download,
   GitCompare,
   Layers,
+  RefreshCw,
   ListChecks,
   Octagon,
   PackageOpen,
@@ -18,6 +19,7 @@ import OneuiSelect from '../components/ui/OneuiSelect.vue'
 import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
 import { goTab, openOverlay } from '../stores/nav.js'
+import { openLocalUpdate } from '../stores/localupdate.js'
 import {
   buildProgress,
   capabilities,
@@ -61,6 +63,11 @@ function onSelect(job) {
 
 function openHints(job) {
   openOverlay('hints', { jobId: job.id })
+}
+
+function startLocalUpdate(job) {
+  openLocalUpdate(job)
+  openOverlay('localUpdate')
 }
 
 function openJobMods(job) {
@@ -142,6 +149,14 @@ function openJobMods(job) {
           >
             <Download :size="14" /> {{ t('downloadZip') }}
           </a>
+          <button
+            v-if="job.artifact_path"
+            type="button"
+            class="chip-button is-info"
+            @click.stop="startLocalUpdate(job)"
+          >
+            <RefreshCw :size="14" /> {{ t('localUpdateChip') }}
+          </button>
           <button
             v-if="job.artifact_path || job.target_files_path"
             type="button"
