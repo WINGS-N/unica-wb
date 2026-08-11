@@ -20,6 +20,7 @@ class BuildJobCreate(BaseModel):
     force: bool = False
     no_rom_zip: bool = False
     skip_target_files: bool = False
+    incremental_base_job_id: str | None = Field(default=None, min_length=8, max_length=64)
 
 
 class BuildJobRead(BaseModel):
@@ -40,6 +41,7 @@ class BuildJobRead(BaseModel):
     no_rom_zip: bool
     skip_target_files: bool
     target_files_path: str | None = None
+    incremental_base_job_id: str | None = None
     status: str
     queue_job_id: str | None
     return_code: int | None

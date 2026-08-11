@@ -816,30 +816,72 @@ def _target_config_value(root: Path, codename: str, key: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _incremental_zip_cmd(root: Path, target_codename: str, base_path: str, target_files_path: str) -> str:
+    # The generated config is a snapshot from whichever build ran last, and a key
+    # added to the target afterwards is still "none" there. imgdiff needs the
+    # cache size to bound a patch, and that size describes the device rather than
+    # the images being packed, so it is safe to refresh
+    refresh = ""
+    cache_size = _target_config_value(root, target_codename, "TARGET_CACHE_PARTITION_SIZE")
+    if cache_size:
+        refresh = (
+            "sed -i "
+            + shlex.quote(f"s|^TARGET_CACHE_PARTITION_SIZE=.*|TARGET_CACHE_PARTITION_SIZE={_sh_dq(cache_size)}|")
+            + " out/config.sh && "
+        )
+    return (
+        f"cd {shlex.quote(str(root))} && "
+        f"{refresh}"
+        f"source buildenv.sh {shlex.quote(target_codename)} && "
+        f"scripts/build_flashable_zip.sh --incremental {shlex.quote(base_path)} "
+        f"{shlex.quote(target_files_path)}"
+    )
+
+
+def _pack_incremental_zip(
+    job_id: str,
+    ctx: ws_lib.WorkspaceRef,
+    log_file: Path,
+    target_codename: str,
+    base_path: str,
+    target_files_path: str,
+) -> int:
+    # Runs inside the build job that just produced the archive, so the whole run
+    # stays one job with one log instead of a second job started by hand
+    cmd = _incremental_zip_cmd(ctx.root, target_codename, base_path, target_files_path)
+    env = os.environ.copy()
+    env.setdefault("PYTHONUNBUFFERED", "1")
+    with log_file.open("ab") as lf:
+        lf.write(f"[incremental] base={Path(base_path).name} target={Path(target_files_path).name}\n".encode())
+        lf.flush()
+        proc = subprocess.Popen(
+            ["bash", "-lc", cmd],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=env,
+            text=True,
+            bufsize=0,
+            preexec_fn=os.setsid,
+        )
+        _set_job_pid(job_id, proc.pid)
+        assert proc.stdout
+        try:
+            while True:
+                raw = os.read(proc.stdout.fileno(), 4096)
+                if not raw:
+                    break
+                lf.write(raw)
+                lf.flush()
+            return proc.wait()
+        finally:
+            _set_job_pid(job_id, None)
+
+
 def run_incremental_zip_job(job_id: str, base_path: str, target_files_path: str, target_codename: str):
     # Packs the difference between two builds that already exist, so nothing has
     # to be rebuilt to change which one the update is measured against
     def _op(log_file: Path, ctx: ws_lib.WorkspaceRef):
-        # The generated config is a snapshot from whichever build ran last, and a
-        # key added to the target afterwards is still "none" there. imgdiff needs
-        # the cache size to bound a patch, and that size describes the device
-        # rather than the images being packed, so it is safe to refresh
-        refresh = ""
-        cache_size = _target_config_value(ctx.root, target_codename, "TARGET_CACHE_PARTITION_SIZE")
-        if cache_size:
-            refresh = (
-                "sed -i "
-                + shlex.quote(f"s|^TARGET_CACHE_PARTITION_SIZE=.*|TARGET_CACHE_PARTITION_SIZE={_sh_dq(cache_size)}|")
-                + " out/config.sh && "
-            )
-
-        cmd = (
-            f"cd {shlex.quote(str(ctx.root))} && "
-            f"{refresh}"
-            f"source buildenv.sh {shlex.quote(target_codename)} && "
-            f"scripts/build_flashable_zip.sh --incremental {shlex.quote(base_path)} "
-            f"{shlex.quote(target_files_path)}"
-        )
+        cmd = _incremental_zip_cmd(ctx.root, target_codename, base_path, target_files_path)
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         started = time.time()
@@ -1630,6 +1672,22 @@ def run_build_job(job_id: str):
                 target_files = _pick_newest(ctx.out, f"{job.target}_*-target_files.zip", run_started_at)
                 if target_files:
                     job.target_files_path = target_files
+                if job.incremental_base_job_id and target_files:
+                    base = db.get(BuildJob, job.incremental_base_job_id)
+                    base_path = str(base.target_files_path or "") if base else ""
+                    if base_path and Path(base_path).is_file():
+                        rc = _pack_incremental_zip(job_id, ctx, log_file, job.target, base_path, target_files)
+                        db.refresh(job)
+                        if rc == 0:
+                            artifact = _pick_newest(ctx.out, "UN1CA_*INCREMENTAL*.zip", run_started_at)
+                            if artifact:
+                                job.artifact_path = artifact
+                        else:
+                            job.status = "failed"
+                            job.error = f"Incremental zip failed with return code {rc}"
+                    else:
+                        job.status = "failed"
+                        job.error = "Target-files zip of the base build is gone"
         else:
             job.status = "failed"
             job.error = f"Build failed with return code {rc}"

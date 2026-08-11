@@ -45,6 +45,8 @@ def run_migrations():
         statements.append("ALTER TABLE build_jobs ADD COLUMN target_files_path VARCHAR(1024)")
     if "skip_target_files" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN skip_target_files BOOLEAN DEFAULT 0")
+    if "incremental_base_job_id" not in cols:
+        statements.append("ALTER TABLE build_jobs ADD COLUMN incremental_base_job_id VARCHAR(64)")
     if "reused_from_job_id" not in cols:
         statements.append("ALTER TABLE build_jobs ADD COLUMN reused_from_job_id VARCHAR(36)")
     if "source_firmware" not in cols:

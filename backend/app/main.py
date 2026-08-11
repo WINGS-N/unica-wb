@@ -1766,6 +1766,21 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
             publish_job_event(job)
             return job
 
+    # An incremental zip is packed right after the build, so the base has to be a
+    # finished build of the same target whose target-files archive is still there
+    incremental_base_job_id = None
+    if payload.incremental_base_job_id:
+        if payload.skip_target_files:
+            raise HTTPException(400, "An incremental zip needs the target-files archive")
+        base = db.get(BuildJob, payload.incremental_base_job_id)
+        if not base or base.workspace_id != ws.id:
+            raise HTTPException(404, "Base build not found")
+        if base.target != payload.target:
+            raise HTTPException(400, "Both builds must be for the same target")
+        if not base.target_files_path or not Path(str(base.target_files_path)).is_file():
+            raise HTTPException(400, "Target-files zip is not available for this build")
+        incremental_base_job_id = base.id
+
     if upload_meta is not None and payload.extra_mods_upload_id:
         upload_meta["used"] = True
         save_upload_meta(settings.data_dir, payload.extra_mods_upload_id, upload_meta)
@@ -1783,6 +1798,8 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
         build_signature=build_signature,
         force=payload.force,
         no_rom_zip=payload.no_rom_zip,
+        skip_target_files=payload.skip_target_files,
+        incremental_base_job_id=incremental_base_job_id,
         extra_mods_archive_path=extra_mods_archive_path,
         extra_mods_modules_json=extra_mods_modules_json,
         debloat_disabled_json=debloat_disabled_json,
