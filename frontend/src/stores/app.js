@@ -212,6 +212,12 @@ function reportError(key, error) {
 
 export const online = ref(typeof navigator === 'undefined' || navigator.onLine !== false)
 
+// The banner about an unreachable backend has no timeout, so anything that
+// proves the backend answers again has to take it down
+function serverAnswered() {
+  if (online.value) dismissToast('connectivity')
+}
+
 function handleOffline() {
   online.value = false
   showToast(t('offlineText'), 'warning', 0, { id: 'connectivity', title: t('offlineTitle') })
@@ -664,6 +670,7 @@ export async function changeTarget(code) {
 // ---------------------------------------------------------------- jobs
 
 export function applyJobs(list) {
+  serverAnswered()
   jobs.value = Array.isArray(list) ? list : []
   const selectedId = selectedJob.value?.id || localStorage.getItem(STORAGE_SELECTED_JOB)
   if (selectedId) {
@@ -1586,6 +1593,7 @@ function markLoading(sections, value) {
 // Each section arrives on its own message, so the screen fills in as the server
 // finishes each piece rather than all at once
 function applySection(section, data) {
+  serverAnswered()
   if (section === 'targets') {
     targetOptions.value = data.target_options || []
     fwScope.value = data.fw_scope || fwScope.value
@@ -1642,6 +1650,7 @@ function connectSockets() {
     path: '/state/ws',
     params: { workspace: activeWorkspaceId.value, target: target.value },
     onOpen() {
+      serverAnswered()
       stopRestFallback()
       markLoading(Object.keys(SECTION_LOADING), true)
     },
