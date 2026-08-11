@@ -417,9 +417,12 @@ def _b64url_decode(text: str) -> bytes:
     return base64.urlsafe_b64decode(padded.encode("utf-8"))
 
 
-def _hash_password(password: str, salt_hex: str) -> str:
+_PASSWORD_ALGO = "sha512"
+
+
+def _hash_password(password: str, salt_hex: str, algo: str = _PASSWORD_ALGO) -> str:
     salt = bytes.fromhex(salt_hex)
-    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
+    digest = hashlib.pbkdf2_hmac(algo, password.encode("utf-8"), salt, 120_000)
     return digest.hex()
 
 
@@ -438,7 +441,7 @@ def _auth_enabled(db: Session) -> bool:
 def _make_token(secret_hex: str) -> str:
     payload = {"ts": int(time.time()), "nonce": secrets.token_hex(8)}
     raw = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-    sig = hmac.new(bytes.fromhex(secret_hex), raw, hashlib.sha256).digest()
+    sig = hmac.new(bytes.fromhex(secret_hex), raw, "sha512_256").digest()
     return f"{_b64url_encode(raw)}.{_b64url_encode(sig)}"
 
 
@@ -446,7 +449,7 @@ def _verify_token(secret_hex: str, token: str) -> bool:
     try:
         payload_b64, sig_b64 = token.split(".", 1)
         raw = _b64url_decode(payload_b64)
-        expected = hmac.new(bytes.fromhex(secret_hex), raw, hashlib.sha256).digest()
+        expected = hmac.new(bytes.fromhex(secret_hex), raw, "sha512_256").digest()
         if not hmac.compare_digest(expected, _b64url_decode(sig_b64)):
             return False
         payload = json.loads(raw.decode("utf-8"))
@@ -543,7 +546,7 @@ def _get_latest_firmware(model: str, csc: str) -> str:
 
 
 def _dir_size_bytes(path: Path) -> int:
-    cache_key = hashlib.sha1(str(path).encode("utf-8")).hexdigest()
+    cache_key = hashlib.new("sha512_256", str(path).encode("utf-8")).hexdigest()[:40]
     redis_key = f"{_DIR_CACHE_KEY_PREFIX}{cache_key}"
     now = time.time()
     cached = _redis_get_json(redis_key)
@@ -952,7 +955,7 @@ def _build_signature(
             ff_signature,
         ]
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:40]
+    return hashlib.new("sha512_256", payload.encode("utf-8")).hexdigest()[:40]
 
 
 def _git_text(root: Path, args: list[str]) -> str:
@@ -1363,8 +1366,16 @@ async def auth_login(payload: dict, db: Session = Depends(get_db)):
         raise HTTPException(400, "Auth is not enabled yet")
     salt = _get_auth_salt(db)
     secret = _get_auth_secret(db)
-    if _hash_password(password, salt) != secret:
+    # A password stored before the move to sha512 still verifies under the
+    # algorithm it was made with, and is rewritten the first time it is used
+    stored_algo = _get_setting(db, "auth.algo", "sha256")
+    if not hmac.compare_digest(_hash_password(password, salt, stored_algo), secret):
         raise HTTPException(401, "Invalid password")
+    if stored_algo != _PASSWORD_ALGO:
+        secret = _hash_password(password, salt)
+        _set_setting(db, "auth.hash", secret)
+        _set_setting(db, "auth.algo", _PASSWORD_ALGO)
+        _invalidate_auth_cache()
     return {"token": _make_token(secret)}
 
 
@@ -1384,6 +1395,7 @@ async def auth_set_password(payload: dict, request: Request, db: Session = Depen
     hashed = _hash_password(password, salt)
     _set_setting(db, "auth.salt", salt)
     _set_setting(db, "auth.hash", hashed)
+    _set_setting(db, "auth.algo", _PASSWORD_ALGO)
     _invalidate_auth_cache()
     return {"enabled": True, "token": _make_token(hashed)}
 
@@ -1670,7 +1682,7 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
         if unknown_mods:
             raise HTTPException(400, f"Unknown mod ids: {', '.join(unknown_mods[:5])}")
         mods_disabled_json = json.dumps(sorted(set(mods_disabled)), ensure_ascii=True)
-        mods_signature = hashlib.sha256(mods_disabled_json.encode("utf-8")).hexdigest()[:16]
+        mods_signature = hashlib.new("sha512_256", mods_disabled_json.encode("utf-8")).hexdigest()[:16]
 
     debloat_disabled = payload.debloat_disabled or []
     valid_debloat_ids = {x["id"] for x in parse_unica_debloat_entries(_project_root(ws) or Path(ws.root))}
@@ -1683,9 +1695,9 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
     debloat_disabled_json = json.dumps(sorted(set(debloat_disabled)), ensure_ascii=True)
     debloat_add_system_json = json.dumps(debloat_add_system, ensure_ascii=True)
     debloat_add_product_json = json.dumps(debloat_add_product, ensure_ascii=True)
-    debloat_signature = hashlib.sha256(debloat_disabled_json.encode("utf-8")).hexdigest()[:16]
-    debloat_add_system_signature = hashlib.sha256(debloat_add_system_json.encode("utf-8")).hexdigest()[:16]
-    debloat_add_product_signature = hashlib.sha256(debloat_add_product_json.encode("utf-8")).hexdigest()[:16]
+    debloat_signature = hashlib.new("sha512_256", debloat_disabled_json.encode("utf-8")).hexdigest()[:16]
+    debloat_add_system_signature = hashlib.new("sha512_256", debloat_add_system_json.encode("utf-8")).hexdigest()[:16]
+    debloat_add_product_signature = hashlib.new("sha512_256", debloat_add_product_json.encode("utf-8")).hexdigest()[:16]
 
     ff_overrides_json = None
     ff_signature = ""
@@ -1697,7 +1709,7 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
             raise HTTPException(400, f"Unknown floating feature keys: {', '.join(invalid_keys[:5])}")
         normalized = {k: normalize_ff_value(v) for k, v in payload.ff_overrides.items()}
         ff_overrides_json = json.dumps(normalized, ensure_ascii=True, sort_keys=True)
-        ff_signature = hashlib.sha256(ff_overrides_json.encode("utf-8")).hexdigest()[:16]
+        ff_signature = hashlib.new("sha512_256", ff_overrides_json.encode("utf-8")).hexdigest()[:16]
 
     # The upload is only consumed once every other input has validated, so a
     # rejected request does not burn the archive the user just uploaded
@@ -1717,7 +1729,7 @@ async def create_job(payload: BuildJobCreate, workspace: str | None = None, db: 
         extra_mods_archive_path = archive_path
         modules = upload_meta.get("modules", [])
         extra_mods_modules_json = json.dumps(modules, ensure_ascii=True)
-        extra_mods_signature = hashlib.sha256(extra_mods_modules_json.encode("utf-8")).hexdigest()[:16]
+        extra_mods_signature = hashlib.new("sha512_256", extra_mods_modules_json.encode("utf-8")).hexdigest()[:16]
 
     build_signature = _build_signature(
         ws.id,
