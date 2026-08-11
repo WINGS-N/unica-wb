@@ -1998,6 +1998,9 @@ async def repo_delete(mode: str = "repo_only", workspace: str | None = None, db:
 
 # Ceiling on one drain pass, so a runaway publisher cannot hold the event loop
 _PUBSUB_DRAIN_LIMIT = 500
+# A connection dropped by something in the middle leaves the browser holding an
+# open socket that never fires close, so every stream has to keep talking
+_WS_PING_INTERVAL_SEC = 20.0
 
 # Log tailing polls the file: fast while it grows, lazy once it goes quiet
 _LOG_POLL_MIN_SEC = 0.15
@@ -2021,6 +2024,7 @@ async def _pump_pubsub(websocket: WebSocket, channel: str, snapshot: dict, error
     try:
         await websocket.send_json(snapshot)
         await asyncio.to_thread(pubsub.subscribe, channel)
+        last_sent = time.time()
         while True:
             # Block for the first message, then take everything already queued
             # behind it. Publishers burst faster than one message per tick, and
@@ -2030,8 +2034,12 @@ async def _pump_pubsub(websocket: WebSocket, channel: str, snapshot: dict, error
             while message and drained < _PUBSUB_DRAIN_LIMIT:
                 if message.get("type") == "message":
                     await websocket.send_json(decode(message))
+                    last_sent = time.time()
                 drained += 1
                 message = await asyncio.to_thread(pubsub.get_message, timeout=0.0)
+            if time.time() - last_sent >= _WS_PING_INTERVAL_SEC:
+                await websocket.send_json({"type": "ping"})
+                last_sent = time.time()
     except WebSocketDisconnect:
         pass
     except RuntimeError:
@@ -2254,10 +2262,19 @@ async def stream_state_ws(websocket: WebSocket):
                 requested = payload.get("sections") or list(STATE_SECTIONS)
                 await send_sections([x for x in requested if x in STATE_SECTIONS])
 
+    async def heartbeat_loop():
+        while True:
+            await asyncio.sleep(_WS_PING_INTERVAL_SEC)
+            await send({"type": "ping"})
+
     await send({"type": "ready"})
     await send_sections(STATE_SECTIONS)
 
-    tasks = [asyncio.create_task(pubsub_loop()), asyncio.create_task(client_loop())]
+    tasks = [
+        asyncio.create_task(pubsub_loop()),
+        asyncio.create_task(client_loop()),
+        asyncio.create_task(heartbeat_loop()),
+    ]
     try:
         await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     except WebSocketDisconnect:
