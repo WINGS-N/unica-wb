@@ -39,8 +39,8 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 CMD curl -fsS http://127.0.0
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["/app/scripts/start-api.sh"]
 
-# The build toolchain is by far the most expensive layer in this file, so it is
-# anchored to the small base and never rebuilds because a python dependency moved
+# The build toolchain is by far the most expensive layer in this file, so it sits
+# on the small base and stays out of the way of the python dependency layers
 FROM runtime-base AS worker-tools
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
@@ -48,10 +48,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     attr \
     bc \
     brotli \
+    bsdiff \
     ccache \
     clang \
     cmake \
     cpio \
+    e2fsprogs \
+    f2fs-tools \
     ffmpeg \
     file \
     golang-go \
