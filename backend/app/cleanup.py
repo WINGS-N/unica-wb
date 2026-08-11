@@ -9,6 +9,62 @@ from .database import SessionLocal
 # A clone writes constantly, so anything touched recently is a live attempt
 STALE_CLONE_AGE_SEC = 600
 
+RETENTION_ROM_KEY = "retention_rom_zips"
+RETENTION_TARGET_FILES_KEY = "retention_target_files"
+
+
+def _keep_newest(rows, column: str, keep: int) -> int:
+    # Rows arrive newest first, so everything past the limit goes
+    removed = 0
+    for row in rows[keep:]:
+        value = getattr(row, column, None)
+        if not value:
+            continue
+        path = Path(str(value))
+        if path.is_file():
+            try:
+                path.unlink()
+                removed += 1
+            except OSError:
+                continue
+        setattr(row, column, None)
+    return removed
+
+
+def apply_artifact_retention(keep_rom: int, keep_target_files: int) -> dict[str, int]:
+    # Artifacts are reproducible and huge, so only the newest few per target are
+    # worth the disk. A job still on the queue keeps its files whatever the limit
+    from .models import BuildJob
+
+    result = {"rom_zips": 0, "target_files": 0}
+    if keep_rom <= 0 and keep_target_files <= 0:
+        return result
+
+    db = SessionLocal()
+    try:
+        live = {"queued", "running"}
+        jobs = (
+            db.query(BuildJob)
+            .filter(BuildJob.status.notin_(live))
+            .order_by(BuildJob.finished_at.desc(), BuildJob.created_at.desc())
+            .all()
+        )
+        by_target: dict[tuple[str, str], list] = {}
+        for job in jobs:
+            by_target.setdefault((str(job.workspace_id or ""), str(job.target or "")), []).append(job)
+
+        for rows in by_target.values():
+            if keep_rom > 0:
+                with_rom = [x for x in rows if x.artifact_path]
+                result["rom_zips"] += _keep_newest(with_rom, "artifact_path", keep_rom)
+            if keep_target_files > 0:
+                with_tf = [x for x in rows if x.target_files_path]
+                result["target_files"] += _keep_newest(with_tf, "target_files_path", keep_target_files)
+        db.commit()
+    finally:
+        db.close()
+    return result
+
 
 def _newest_mtime(path: Path) -> float:
     newest = path.stat().st_mtime

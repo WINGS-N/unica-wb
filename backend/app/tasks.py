@@ -17,13 +17,14 @@ from urllib.parse import quote, urlparse
 
 from . import workspaces as ws_lib
 from .build_progress import set_progress as set_build_progress
+from .cleanup import RETENTION_ROM_KEY, RETENTION_TARGET_FILES_KEY, apply_artifact_retention
 from .config import settings
 from .database import SessionLocal
 from .debloat_utils import apply_debloat_overrides, restore_debloat_file
 from .ff_utils import apply_ff_overrides, restore_ff_overrides
 from .firmware_progress import set_progress
 from .job_events import publish as publish_job_event
-from .models import BuildJob, Workspace
+from .models import AppSetting, BuildJob, Workspace
 from .mods_archive import validate_mods_archive
 from .mods_utils import apply_mods_disabled_overrides, restore_mods_overrides
 from .push import notify_job
@@ -804,6 +805,30 @@ def run_download_samsung_fw_job(job_id: str, target_codename: str, kind: str, fw
                 _invalidate_dir_size_cache_paths([odin_dir, ctx.out / "fw"])
 
     _run_operation_job(job_id, _op)
+
+
+def _prune_artifacts():
+    # A finished build is when new files land, so the limits are applied there
+    db = SessionLocal()
+    try:
+        keep_rom = _setting_int(db, RETENTION_ROM_KEY)
+        keep_target_files = _setting_int(db, RETENTION_TARGET_FILES_KEY)
+    finally:
+        db.close()
+    if keep_rom <= 0 and keep_target_files <= 0:
+        return
+    try:
+        apply_artifact_retention(keep_rom, keep_target_files)
+    except Exception:
+        pass
+
+
+def _setting_int(db, key: str) -> int:
+    row = db.get(AppSetting, key)
+    try:
+        return int((row.value if row else "0") or 0)
+    except ValueError:
+        return 0
 
 
 def _target_config_value(root: Path, codename: str, key: str) -> str:
@@ -1784,6 +1809,7 @@ def run_build_job(job_id: str):
         db.commit()
         publish_job_event(job)
         notify_job(job)
+        _prune_artifacts()
 
     except Exception as exc:
         job = db.get(BuildJob, job_id)

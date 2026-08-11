@@ -37,7 +37,12 @@ from .build_progress import (
 from .build_progress import (
     list_progress as list_build_progress,
 )
-from .cleanup import cleanup_stale_build_overrides
+from .cleanup import (
+    RETENTION_ROM_KEY,
+    RETENTION_TARGET_FILES_KEY,
+    apply_artifact_retention,
+    cleanup_stale_build_overrides,
+)
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
@@ -78,6 +83,7 @@ from .schemas import (
     PushSubscriptionCreate,
     PushSubscriptionDelete,
     RepoConfigUpdate,
+    RetentionUpdate,
     StopJobRequest,
     WorkspaceCreate,
     WorkspaceUpdate,
@@ -1923,6 +1929,26 @@ async def update_repo_config(payload: RepoConfigUpdate, workspace: str | None = 
     db.refresh(ws_row)
     _invalidate_repo_caches(ws_row.id)
     return await asyncio.to_thread(_repo_info, ws_lib.snapshot(ws_row))
+
+
+@app.get(f"{settings.api_prefix}/settings/retention")
+async def get_retention(db: Session = Depends(get_db)):
+    return {
+        "rom_zips": int(_get_setting(db, RETENTION_ROM_KEY, "0") or 0),
+        "target_files": int(_get_setting(db, RETENTION_TARGET_FILES_KEY, "0") or 0),
+    }
+
+
+@app.patch(f"{settings.api_prefix}/settings/retention")
+async def update_retention(payload: RetentionUpdate, db: Session = Depends(get_db)):
+    if payload.rom_zips is not None:
+        _set_setting(db, RETENTION_ROM_KEY, str(payload.rom_zips))
+    if payload.target_files is not None:
+        _set_setting(db, RETENTION_TARGET_FILES_KEY, str(payload.target_files))
+    keep_rom = int(_get_setting(db, RETENTION_ROM_KEY, "0") or 0)
+    keep_tf = int(_get_setting(db, RETENTION_TARGET_FILES_KEY, "0") or 0)
+    removed = await asyncio.to_thread(apply_artifact_retention, keep_rom, keep_tf)
+    return {"rom_zips": keep_rom, "target_files": keep_tf, "removed": removed}
 
 
 @app.get(f"{settings.api_prefix}/settings/advanced")

@@ -79,6 +79,11 @@ class AdvancedSettingsUpdate(BaseModel):
     targets_override: str | None = Field(default=None, max_length=4096)
 
 
+class RetentionUpdate(BaseModel):
+    rom_zips: int | None = Field(default=None, ge=0, le=99)
+    target_files: int | None = Field(default=None, ge=0, le=99)
+
+
 class WorkspaceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     git_url: str = Field(min_length=8, max_length=512)
