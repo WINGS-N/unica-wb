@@ -15,15 +15,17 @@ MANIFEST_NAME = "manifest.json"
 
 
 def _digest(data: bytes) -> str:
-    return hashlib.new("sha512_256", data).hexdigest()
+    # Truncated so a block map stays small, and sha512 because that is what a
+    # browser can compute natively
+    return hashlib.sha512(data).hexdigest()[:64]
 
 
 def _file_digest(path: Path) -> str:
-    digest = hashlib.new("sha512_256")
+    digest = hashlib.sha512()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(block)
-    return digest.hexdigest()
+    return digest.hexdigest()[:64]
 
 
 def _read_chunk(path: Path, index: int) -> bytes:
@@ -48,7 +50,7 @@ def build_delta(base: Path, target: Path, output: Path, log=print) -> dict:
         "algorithm": "zstd-patch-from",
         "chunk_size": CHUNK_SIZE,
         "window_log": WINDOW_LOG,
-        "hash": "sha512_256",
+        "hash": "sha512-256bit-prefix",
         "base": {"name": base.name, "size": base_size, "digest": _file_digest(base)},
         "target": {"name": target.name, "size": target_size},
         "chunks": [],
@@ -166,3 +168,43 @@ def apply_delta(base: Path, bundle_path: Path, output: Path) -> str:
 
 def zstd_available() -> bool:
     return bool(shutil.which("zstd"))
+
+
+# A browser cannot run zstd, but it can hash and it can ask for byte ranges, so
+# it gets a map of the finished file and pulls only the blocks it lacks
+BLOCK_SIZE = 4 * 1024 * 1024
+
+
+def build_block_map(path: Path, block_size: int = BLOCK_SIZE) -> dict:
+    blocks = []
+    with path.open("rb") as handle:
+        while True:
+            data = handle.read(block_size)
+            if not data:
+                break
+            blocks.append(_digest(data))
+    return {
+        "version": 1,
+        "hash": "sha512-256bit-prefix",
+        "name": path.name,
+        "size": path.stat().st_size,
+        "block_size": block_size,
+        "blocks": blocks,
+    }
+
+
+def cached_block_map(path: Path, block_size: int = BLOCK_SIZE) -> dict:
+    cache = path.with_suffix(path.suffix + ".blockmap.json")
+    try:
+        if cache.is_file() and cache.stat().st_mtime >= path.stat().st_mtime:
+            data = json.loads(cache.read_text())
+            if data.get("block_size") == block_size and data.get("size") == path.stat().st_size:
+                return data
+    except (OSError, ValueError):
+        pass
+    data = build_block_map(path, block_size)
+    try:
+        cache.write_text(json.dumps(data, ensure_ascii=True))
+    except OSError:
+        pass
+    return data

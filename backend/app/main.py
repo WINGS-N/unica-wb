@@ -46,6 +46,7 @@ from .cleanup import (
 from .config import settings
 from .database import Base, SessionLocal, engine, get_db, run_migrations
 from .debloat_utils import parse_unica_debloat_entries
+from .delta import cached_block_map
 from .error_hints import detect_build_hints
 from .ff_utils import (
     apply_custom_features,
@@ -2697,6 +2698,13 @@ async def get_job(job_id: str):
 async def download_artifact(job_id: str):
     p = await asyncio.to_thread(_get_job_artifact_path_with_new_session, job_id)
     return FileResponse(path=p, filename=p.name, media_type="application/zip")
+
+
+@app.get(f"{settings.api_prefix}/jobs/{{job_id}}/artifact/blockmap")
+async def artifact_block_map(job_id: str):
+    # Hashing a multi gigabyte file is slow enough to keep next to the artifact
+    p = await asyncio.to_thread(_get_job_artifact_path_with_new_session, job_id)
+    return await asyncio.to_thread(cached_block_map, p)
 
 
 @app.delete(f"{settings.api_prefix}/jobs/{{job_id}}/artifact")
