@@ -325,7 +325,7 @@
       // A reconnect replays the current progress, which would repeat the line
       if (text === lastLogged) return
       lastLogged = text
-      const stamp = new Date().toLocaleTimeString()
+      const stamp = new Date().toLocaleTimeString([], { hourCycle: 'h23' })
       const prev = logsEl.textContent ? `${logsEl.textContent}\n` : ''
       logsEl.textContent = `${prev}[${stamp}] ${text}`.split('\n').slice(-200).join('\n')
       logsEl.scrollTop = logsEl.scrollHeight
