@@ -418,5 +418,21 @@
   "saved": "Saved",
   "deltaPatch": "Delta",
   "deltaTitle": "Delta against an earlier build",
-  "deltaHint": "Ship only what changed, to be applied locally with zstd over the archive you already have"
+  "deltaHint": "Ship only what changed, to be applied locally with zstd over the archive you already have",
+  "localUpdateChip": "Update local file",
+  "localUpdateTitle": "Update a local copy",
+  "localUpdateHint": "Point at the archive you already have and only the blocks that differ are downloaded",
+  "localUpdatePick": "Choose the file you already have",
+  "localUpdatePickHint": "An earlier build of the same device",
+  "localUpdateStart": "Update",
+  "localUpdateHashing": "Comparing your copy",
+  "localUpdateFetching": "Downloading what differs",
+  "localUpdateWriting": "Finishing the file",
+  "localUpdateDone": "Ready",
+  "localUpdateFailed": "Update failed",
+  "localUpdateBlocks": "Blocks",
+  "localUpdateReused": "Taken from your copy",
+  "localUpdateDownloaded": "Downloaded",
+  "localUpdateSaved": "Not downloaded",
+  "localUpdateSave": "Save the file"
 }

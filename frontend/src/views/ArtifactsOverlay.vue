@@ -1,11 +1,13 @@
 <script setup>
 import { onMounted } from 'vue'
-import { Download, GitCompare, Layers, PackageOpen, Trash2 } from 'lucide-vue-next'
+import { Download, GitCompare, Layers, PackageOpen, RefreshCw, Trash2 } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
 import { t } from '../lang/index.js'
 import { downloadUrl } from '../stores/api.js'
+import { openOverlay } from '../stores/nav.js'
+import { openLocalUpdate } from '../stores/localupdate.js'
 import {
   artifacts,
   capabilities,
@@ -19,6 +21,11 @@ import {
   queueDsuPackage,
   target
 } from '../stores/app.js'
+
+function startLocalUpdate(item) {
+  openLocalUpdate(item)
+  openOverlay('localUpdate')
+}
 
 onMounted(fetchArtifacts)
 </script>
@@ -65,6 +72,9 @@ onMounted(fetchArtifacts)
             @click="openDeltaModal(item)"
           >
             <GitCompare :size="14" /> {{ t('deltaPatch') }}
+          </button>
+          <button v-if="item.exists" type="button" class="chip-button is-info" @click="startLocalUpdate(item)">
+            <RefreshCw :size="14" /> {{ t('localUpdateChip') }}
           </button>
           <button
             v-if="capabilities.dsu_package && item.target_files_exists"

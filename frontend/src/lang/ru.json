@@ -418,5 +418,21 @@
   "saved": "Сохранено",
   "deltaPatch": "Дельта",
   "deltaTitle": "Дельта к ранней сборке",
-  "deltaHint": "Отдать только изменения, применяются локально через zstd поверх уже скачанного архива"
+  "deltaHint": "Отдать только изменения, применяются локально через zstd поверх уже скачанного архива",
+  "localUpdateChip": "Обновить локальный",
+  "localUpdateTitle": "Обновление локальной копии",
+  "localUpdateHint": "Укажите архив, который уже есть, и скачаются только разошедшиеся блоки",
+  "localUpdatePick": "Выберите файл, который уже есть",
+  "localUpdatePickHint": "Более ранняя сборка того же устройства",
+  "localUpdateStart": "Обновить",
+  "localUpdateHashing": "Сверка вашей копии",
+  "localUpdateFetching": "Загрузка расхождений",
+  "localUpdateWriting": "Завершение файла",
+  "localUpdateDone": "Готово",
+  "localUpdateFailed": "Обновление не удалось",
+  "localUpdateBlocks": "Блоков",
+  "localUpdateReused": "Взято из вашей копии",
+  "localUpdateDownloaded": "Скачано",
+  "localUpdateSaved": "Не скачивалось",
+  "localUpdateSave": "Сохранить файл"
 }

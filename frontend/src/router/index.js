@@ -9,6 +9,7 @@ import SettingsView from '../views/SettingsView.vue'
 import ModsOverlay from '../views/ModsOverlay.vue'
 import DebloatOverlay from '../views/DebloatOverlay.vue'
 import FloatingFeaturesOverlay from '../views/FloatingFeaturesOverlay.vue'
+import LocalUpdateOverlay from '../views/LocalUpdateOverlay.vue'
 import ArtifactsOverlay from '../views/ArtifactsOverlay.vue'
 import UploadModsOverlay from '../views/UploadModsOverlay.vue'
 import WorkspacesOverlay from '../views/WorkspacesOverlay.vue'
@@ -47,6 +48,12 @@ const routes = [
     meta: { tab: 'build', overlay: true }
   },
   { path: '/build/artifacts', name: 'artifacts', component: ArtifactsOverlay, meta: { tab: 'build', overlay: true } },
+  {
+    path: '/build/artifacts/update',
+    name: 'localUpdate',
+    component: LocalUpdateOverlay,
+    meta: { tab: 'build', overlay: true }
+  },
   { path: '/build/repo', name: 'repo', component: RepoOverlay, meta: { tab: 'build', overlay: true } },
   {
     path: '/settings/workspaces',
