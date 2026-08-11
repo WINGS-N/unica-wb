@@ -1409,14 +1409,18 @@ def run_build_job(job_id: str):
             override_exports.append(f"export SOURCE_FIRMWARE={shlex.quote(job.source_firmware)}")
         if job.target_firmware:
             override_exports.append(f"export TARGET_FIRMWARE={shlex.quote(job.target_firmware)}")
-        # buildenv generates out/config.sh and everything downstream sources it,
-        # so an exported ROM_VERSION is overwritten before it is ever read. The
-        # generated file is build output, not the checkout, so rewriting it there
-        # neither touches upstream sources nor dirties the tree
+        # buildenv generates out/config.sh and exports every value in it, and the
+        # build reads the exported variable rather than the file, so the version
+        # has to be replaced in both. The generated file is build output, not the
+        # checkout, so rewriting it there neither touches upstream sources nor
+        # dirties the tree
         rewrite_version = ""
         if job.version_major is not None and job.version_minor is not None and job.version_patch is not None:
             rewrite_version = (
-                "sed -i " + shlex.quote(f"s|^ROM_VERSION=.*|ROM_VERSION={_sh_dq(rom_version)}|") + " out/config.sh"
+                "sed -i "
+                + shlex.quote(f"s|^ROM_VERSION=.*|ROM_VERSION={_sh_dq(rom_version)}|")
+                + " out/config.sh && export ROM_VERSION="
+                + shlex.quote(rom_version)
             )
 
         if job.extra_mods_archive_path and Path(job.extra_mods_archive_path).exists():
