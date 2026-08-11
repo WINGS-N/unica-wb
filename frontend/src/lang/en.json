@@ -415,5 +415,8 @@
   "retentionApplied": "Removed",
   "retentionLoadFailed": "Failed to load the retention settings",
   "retentionSaveFailed": "Failed to save the retention settings",
-  "saved": "Saved"
+  "saved": "Saved",
+  "deltaPatch": "Delta",
+  "deltaTitle": "Delta against an earlier build",
+  "deltaHint": "Ship only what changed, to be applied locally with zstd over the archive you already have"
 }

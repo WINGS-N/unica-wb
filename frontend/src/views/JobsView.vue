@@ -1,6 +1,16 @@
 <script setup>
 import { computed } from 'vue'
-import { CircleHelp, Download, Layers, ListChecks, Octagon, PackageOpen, Sparkles, Trash2 } from 'lucide-vue-next'
+import {
+  CircleHelp,
+  Download,
+  GitCompare,
+  Layers,
+  ListChecks,
+  Octagon,
+  PackageOpen,
+  Sparkles,
+  Trash2
+} from 'lucide-vue-next'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import ProgressBar from '../components/ui/ProgressBar.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -26,6 +36,7 @@ import {
   loadFFFromJob,
   loadModsFromJob,
   openDeleteArtifactModal,
+  openDeltaModal,
   openIncrementalModal,
   openStopModal,
   parseJobMods,
@@ -146,6 +157,14 @@ function openJobMods(job) {
             @click.stop="openIncrementalModal(job)"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+          <button
+            v-if="capabilities.delta_zstd && job.status === 'succeeded' && job.target_files_path"
+            type="button"
+            class="chip-button is-info"
+            @click.stop="openDeltaModal(job)"
+          >
+            <GitCompare :size="14" /> {{ t('deltaPatch') }}
           </button>
           <button
             v-if="capabilities.dsu_package && job.status === 'succeeded' && job.target_files_path"

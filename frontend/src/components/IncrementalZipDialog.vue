@@ -13,6 +13,7 @@ import {
   incrementalBusy,
   incrementalForJob,
   incrementalLoading,
+  incrementalMode,
   queueIncrementalZip,
   selectJob
 } from '../stores/app.js'
@@ -28,8 +29,14 @@ async function submit() {
 </script>
 
 <template>
-  <SamsungModal :open="Boolean(incrementalForJob)" :title="t('incrementalTitle')" @close="incrementalForJob = null">
-    <p class="text-[14px] text-un1ca-muted">{{ t('incrementalHint') }}</p>
+  <SamsungModal
+    :open="Boolean(incrementalForJob)"
+    :title="incrementalMode === 'delta' ? t('deltaTitle') : t('incrementalTitle')"
+    @close="incrementalForJob = null"
+  >
+    <p class="text-[14px] text-un1ca-muted">
+      {{ incrementalMode === 'delta' ? t('deltaHint') : t('incrementalHint') }}
+    </p>
     <p class="section-kicker mt-3">{{ t('target') }}: {{ targetLabel }}</p>
 
     <div v-if="incrementalLoading" class="loading-block"><SamsungLoader /></div>

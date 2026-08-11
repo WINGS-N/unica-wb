@@ -1,6 +1,6 @@
 <script setup>
 import { onMounted } from 'vue'
-import { Download, Layers, PackageOpen, Trash2 } from 'lucide-vue-next'
+import { Download, GitCompare, Layers, PackageOpen, Trash2 } from 'lucide-vue-next'
 import OverlayView from '../components/ui/OverlayView.vue'
 import SamsungLoader from '../components/ui/SamsungLoader.vue'
 import StatusPill from '../components/ui/StatusPill.vue'
@@ -14,6 +14,7 @@ import {
   formatBytes,
   formatDateTime,
   openDeleteArtifactModal,
+  openDeltaModal,
   openIncrementalModal,
   queueDsuPackage,
   target
@@ -56,6 +57,14 @@ onMounted(fetchArtifacts)
             @click="openIncrementalModal({ id: item.job_id, target: item.target })"
           >
             <Layers :size="14" /> {{ t('incrementalZip') }}
+          </button>
+          <button
+            v-if="capabilities.delta_zstd && item.target_files_exists"
+            type="button"
+            class="chip-button is-info"
+            @click="openDeltaModal(item)"
+          >
+            <GitCompare :size="14" /> {{ t('deltaPatch') }}
           </button>
           <button
             v-if="capabilities.dsu_package && item.target_files_exists"

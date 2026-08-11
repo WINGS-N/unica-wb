@@ -1117,6 +1117,7 @@ export const incrementalBase = ref('')
 export const incrementalBusy = ref(false)
 export const incrementalLoading = ref(false)
 export const incrementalForJob = ref(null)
+export const incrementalMode = ref('zip')
 
 // Only builds of the same target that still have their target-files archive can
 // serve as a base for the difference
@@ -1175,7 +1176,13 @@ export async function loadIncrementalBasesForTarget() {
   }
 }
 
-export async function openIncrementalModal(job) {
+export async function openDeltaModal(row) {
+  incrementalMode.value = 'delta'
+  await openIncrementalModal({ id: row.id || row.job_id, target: row.target }, 'delta')
+}
+
+export async function openIncrementalModal(job, mode = 'zip') {
+  incrementalMode.value = mode
   incrementalForJob.value = job
   incrementalBases.value = []
   incrementalBase.value = ''
@@ -1231,9 +1238,11 @@ export async function queueIncrementalZip() {
   const job = incrementalForJob.value
   const base = incrementalBase.value
   if (!job || !base) return
+  const path = incrementalMode.value === 'delta' ? 'delta' : 'incremental'
+  const params = incrementalMode.value === 'delta' ? { base_job_id: base, kind: 'target_files' } : { base_job_id: base }
   incrementalBusy.value = true
   try {
-    const created = await apiFetch(`/jobs/${job.id}/incremental`, { method: 'POST', params: { base_job_id: base } })
+    const created = await apiFetch(`/jobs/${job.id}/${path}`, { method: 'POST', params })
     incrementalForJob.value = null
     showToast(t('incrementalQueued'), 'success')
     await fetchJobs()
