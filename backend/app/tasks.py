@@ -979,21 +979,34 @@ def run_dsu_package_job(job_id: str, target_files_path: str, target_codename: st
         source = "built" if all((built / name).is_file() for name in DSU_IMAGES) else "zip"
         stem = Path(target_files_path).name.replace("-target_files.zip", "")
         output = ctx.out / f"DSU_{stem}.zip"
+        stage = ctx.out / "target" / target_codename / "dsu-stage"
         images = " ".join(DSU_IMAGES)
 
         if source == "built":
-            pack = f"cd {shlex.quote(str(built))} && 7z a -tzip -mx=0 -mmt=$(nproc) {shlex.quote(str(output))} {images}"
-        else:
-            stage = ctx.out / "target" / target_codename / "dsu-stage"
-            pack = (
-                f"rm -rf {shlex.quote(str(stage))} && mkdir -p {shlex.quote(str(stage))} && "
-                f"unzip -o {shlex.quote(target_files_path)} {images} -d {shlex.quote(str(stage))} && "
-                f"cd {shlex.quote(str(stage))} && "
-                f"7z a -tzip -mx=0 -mmt=$(nproc) {shlex.quote(str(output))} {images} && "
-                f"rm -rf {shlex.quote(str(stage))}"
+            collect = " && ".join(
+                f"cp -a {shlex.quote(str(built / name))} {shlex.quote(str(stage / name))}" for name in DSU_IMAGES
             )
+        else:
+            collect = f"unzip -o {shlex.quote(target_files_path)} {images} -d {shlex.quote(str(stage))}"
 
-        cmd = f"rm -f {shlex.quote(str(output))} && {pack}"
+        # gsid maps a dsu image as a block device, so a sparse container has to be
+        # expanded or the mapped partition is unreadable
+        expand = " && ".join(
+            f"if [ \"$(head -c 4 {shlex.quote(str(stage / name))} | od -An -tx1 | tr -d ' ')\" = 3aff26ed ]; then "
+            f"simg2img {shlex.quote(str(stage / name))} {shlex.quote(str(stage / (name + '.raw')))} && "
+            f"mv -f {shlex.quote(str(stage / (name + '.raw')))} {shlex.quote(str(stage / name))}; fi"
+            for name in DSU_IMAGES
+        )
+
+        cmd = (
+            f"rm -f {shlex.quote(str(output))} && "
+            f"rm -rf {shlex.quote(str(stage))} && mkdir -p {shlex.quote(str(stage))} && "
+            f"cd {shlex.quote(str(ctx.root))} && source buildenv.sh {shlex.quote(target_codename)} && "
+            f"{collect} && {expand} && "
+            f"cd {shlex.quote(str(stage))} && "
+            f"7z a -tzip -mx=0 -mmt=$(nproc) {shlex.quote(str(output))} {images} && "
+            f"rm -rf {shlex.quote(str(stage))}"
+        )
         env = os.environ.copy()
         env.setdefault("PYTHONUNBUFFERED", "1")
         with log_file.open("ab") as lf:
