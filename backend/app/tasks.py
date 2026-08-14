@@ -589,6 +589,17 @@ class _FirmwareProgressTracker:
             )
 
 
+def _job_status_fresh(job_id: str) -> str:
+    # Reading through the caller's session would either see its own pending work
+    # or, if refreshed, throw that work away before it is committed
+    db = SessionLocal()
+    try:
+        row = db.get(BuildJob, job_id)
+        return str(row.status or "") if row else ""
+    finally:
+        db.close()
+
+
 def _job_status(db, job_id: str) -> str:
     # Cancellation is written by a different session, so the identity map has to
     # be dropped or we keep reading the status we wrote ourselves
@@ -1830,8 +1841,10 @@ def run_build_job(job_id: str):
                     if base_path and Path(base_path).is_file():
                         target_side = _built_target_dir(ctx, job.target) or target_files
                         rc = _pack_incremental_zip(job_id, ctx, log_file, job.target, base_path, target_side)
-                        db.refresh(job)
-                        if rc == 0:
+                        if _job_status_fresh(job_id) == "canceled":
+                            job.status = "canceled"
+                            job.error = job.error or "Build canceled by user"
+                        elif rc == 0:
                             artifact = _pick_newest(ctx.out, "UN1CA_*INCREMENTAL*.zip", run_started_at)
                             if artifact:
                                 job.artifact_path = artifact
